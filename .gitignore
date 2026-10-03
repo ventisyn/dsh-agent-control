@@ -1,0 +1,9 @@
+node_modules/
+*.log
+*.tmp
+*.bak-*
+.DS_Store
+Thumbs.db
+
+# 本机特有信息（AGENTS.md 第 5 节）：只留在本机，绝不进仓库
+AGENTS.local.md

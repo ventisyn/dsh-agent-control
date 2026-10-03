@@ -1,0 +1,10 @@
+# 统一用 LF：这个仓库要在 Windows 与其他平台之间来回复制，
+# 不固定的话 `core.autocrlf=true` 会把每个文件都改写成 CRLF，
+# 于是每次克隆/切换分支都出现「全部文件都被修改」的假 diff。
+* text=auto eol=lf
+
+# 二进制文件不要碰
+*.png binary
+*.jpg binary
+*.ico binary
+*.zstd binary

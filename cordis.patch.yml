@@ -1,0 +1,3 @@
+- insert:
+    - id: agent-control
+      name: dsh-agent-control
