@@ -16,6 +16,10 @@ export const PATHS = {
   sessionDelete: `${API_PREFIX}/session/delete`,
   turns: `${API_PREFIX}/turns`,
   turnDelete: `${API_PREFIX}/turn/delete`,
+  // 热重启（见 docs/PLAN-hot-restart.md 3.2）。status 是新进程的「就绪探针」，
+  // 辅助进程靠它判断新进程是否已经起来了。
+  restartStatus: `${API_PREFIX}/restart/status`,
+  restart: `${API_PREFIX}/restart`,
 }
 
 /**
@@ -32,6 +36,12 @@ export const ERROR_CODES = {
   sessionLive: 'SESSION_LIVE',
   agentBusy: 'AGENT_BUSY',
   deleteFailed: 'DELETE_FAILED',
+  // 热重启。与删除类共用一个错误码空间：客户端只需要一处映射表。
+  restartBlocked: 'RESTART_BLOCKED',
+  restartInProgress: 'RESTART_IN_PROGRESS',
+  restartRateLimited: 'RESTART_RATE_LIMITED',
+  restartUnsupported: 'RESTART_UNSUPPORTED',
+  restartDenied: 'RESTART_DENIED',
 }
 
 /** 带错误码的失败。路由层按码决定 HTTP 状态。 */
@@ -67,6 +77,14 @@ export function statusForCode(code) {
     case ERROR_CODES.turnCompacted:
     case ERROR_CODES.sessionLive: return 409
     case ERROR_CODES.agentBusy: return 423
+    // 重启：403 是「不允许你重启」（审批被拒 / Origin 校验失败），
+    // 409 是「现在不行」（有阻塞项 / 已经有一个在跑），429 是「太频繁」，
+    // 501 是「这个部署根本做不到」——四者的处置方式完全不同，绝不能合并。
+    case ERROR_CODES.restartDenied: return 403
+    case ERROR_CODES.restartBlocked:
+    case ERROR_CODES.restartInProgress: return 409
+    case ERROR_CODES.restartRateLimited: return 429
+    case ERROR_CODES.restartUnsupported: return 501
     default: return 500
   }
 }
