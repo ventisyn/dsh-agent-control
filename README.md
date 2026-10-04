@@ -77,6 +77,9 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>
 ```sh
 # 会话列表（同时也是「路由是否注册成功」的探针）
 curl http://127.0.0.1:<端口>/api/agent-control/sessions
+
+# 热重启的状态（也是辅助进程判断「新进程起来了没有」的探针）
+curl http://127.0.0.1:<端口>/api/agent-control/restart/status
 ```
 
 浏览器控制台里：
@@ -117,7 +120,7 @@ POST /api/agent-control/restart           { reason?, force? } → 202 { ok, rest
 ## 开发
 
 ```sh
-npm test    # 语法检查 + 84 项离线测试，不需要 DSH 进程，也不碰真实 profile
+npm test    # 语法检查 + 194 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
 设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)。

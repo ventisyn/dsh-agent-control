@@ -1,8 +1,7 @@
 # VERIFY — 0.2.1-alpha.1-v1.1.0（热重启）
 
-> 状态：**进行中**。M0（原型）已实测并记录在案；M3（host 接线）、M4（设置页）、M6（端到端）的实测结果**尚未**写入本文。
-> 未验证项集中列在第 7 节，**不要**把本文当作「全部通过」。
-> 按 AGENTS.md 第 8 节：本文不写本机路径、profile 名、实例名与端口。
+> 记录 `docs/PLAN-hot-restart.md` 的 M0–M6 实测。**未验证项集中在第 8 节**，不要当成全部通过。
+> 按 AGENTS.md 第 8 节：本文不写本机路径、profile 名、实例名与端口（除「一次性备用实例」这类描述）。
 
 ## 1. M0 原型：热重启在真机上跑通了 ✅
 
@@ -20,7 +19,7 @@
 
 - 两次都写出 `last.json{ok:true}`，`bootId` 每次都变，新进程接管**同一端口**并正常服务。
 - 旧进程的退出**没有**触及启动器 5 秒的 force-exit 兜底（整棵树 0.7 秒内 dispose 完）。
-- 结论：停机时间由**新进程的启动耗时**主导，不由旧进程关停主导；`expectedDowntimeSeconds` 按 10 秒量级给用户预期是合理的。
+- 结论：停机时间由**新进程的启动耗时**主导，不由旧进程关停主导。
 
 ## 2. S2：启动现场能否原样重放 ✅
 
@@ -34,61 +33,162 @@
 - **`dsh web` 只是 `--profile web` 的简写**：`web` 会被启动器当成 `--profile` 的值消化掉，**不会**出现在 app 的 `cmdlineArgs` 里。把 `web` 当位置参数再传一次，web app 自己的 commander 当场拒绝：`error: too many arguments. Expected 0 arguments but got 1: web`（实测）。
 - `execPath` 是系统 node、`execArgv` 为 `[]`、`cwd` 继承启动者、env 含 `DSH_HOME`（51 个键）。
 - 结论：没有只存在于启动器内存里的状态，`process.argv.slice(1)` 足以重放；**`argv[0]` 是入口脚本路径**，所以重放必须是 `spawn(execPath, [...execArgv, ...argv])`。
-- 影响：`appendNoOpen` 不解析 argv（「是不是 web 应用」由 host 显式传入）；`buildLaunchSpec` 的 `argv` 语义固定为 `process.argv.slice(1)`。
 
-## 3. S3：Service 契约 ✅（一项待验）
+## 3. S3：Service 契约 ✅
 
-用 `cordis_inspect_query`（host `Service.listService`）逐个核对，**没有照抄任何现成实现**：
+用 `cordis_inspect_query` 逐个核对（host `Service.listService`），**没有照抄任何现成实现**：
 
 | 需求 | 核对结果 |
 | --- | --- |
 | 注册工具 | `ctx.tools.register(definition: ToolDefinition): () => void`；定义必须带 `output: { schema, render }` |
 | 工具里拿调用者 | `ToolExecutionInput.agent?: Agent` ⇒ `exec.agent?.id` |
 | 结束本轮 | `ToolRunContext.concludeTurn()` |
-| 审批 | `ctx.approval.request({ agent, toolName, callId?, reason?, signal? })` → `'allowed-once'｜'rejected'｜'cancelled'｜'unavailable'`（**只有 `allowed-once` 是放行**）；要求当时有打开的轮次 |
-| 路由可信校验 | `ctx.connection.requestRejection({ headers })` → `401｜403｜undefined`（直接复用宿主自己的 Host/Origin 校验） |
-| 拉起会话 / 投递 | `ctx.sessionController.resolveAgent(id)` → `{ agent }｜{ error }`；`prompt({ requestId, sessionId, mode, content }, signal)`，文本块是 `{ type: 'text', text }` |
+| 审批 | `ctx.approval.request({ agent, toolName, callId?, reason?, signal? })` → `'allowed-once'｜'rejected'｜'cancelled'｜'unavailable'`（只有 `allowed-once` 放行）；要求当时有打开的轮次 |
+| 路由可信校验 | `ctx.connection.requestRejection({ headers })` → `401｜403｜undefined`——**它同时做浏览器鉴权**，见第 6.2 节的实测后果 |
+| 拉起会话 / 投递 | `ctx.sessionController.resolveAgent(id)` → `{ agent }｜{ error }`；`prompt({ requestId, sessionId, mode, content }, signal)`，文本块 `{ type: 'text', text }` |
 | 后台任务 | `ctx.jobs.list(caller?)`；⚠️ **按所有者隔离**：不传 caller 只看到无主作业 |
-| 端口 | `ctx.webServer.port`（OS 分配后的真实端口）、`ctx.webServer.host`（CLI 明确拒绝 `--host 0.0.0.0`） |
-| 退出 | `ctx.get('appExit')`（启动器经 `provideCmdline` 提供，5 秒兜底强退） |
+| 端口 | `ctx.webServer.port`（OS 分配后的真实端口）、`ctx.webServer.host` |
+| 退出 | `ctx.get('appExit')`（启动器提供，5 秒兜底强退） |
+
+**plugin 行的 `config:` 是否被接受**：用一次性 `DSH_HOME` + `--patch <repo>/cordis.patch.yml --dump-config` 实测 **exit 0**，末层输出完整保留 `config: { approval: ask }`；并核对了 `@deepseek-ai/cordis` 的 `resolveConfig`（插件无 `Config` schema 时原样返回 config）。**真实 mount 时 config 传进 `apply` 未单独取证**（但第 6 节的端到端跑在带这行 config 的 profile 上，插件行为正常）。
 
 ## 4. S4：重启期间的浏览器行为 ✅（人工观察）
 
-用户全程盯住页面的那次重启（旧 pid → 新 pid，停机约 6 秒）：
+用户全程盯住页面的那次重启（停机约 6 秒）：
 
 - 页面**自己恢复**，**不需要手动刷新**；
 - **没有** 401，**没有**要求重新登录；
 - 恢复后界面可用、会话列表正常。
 
-结论：cookie 的签名密钥是持久化的，进程令牌每次启动重新随机**不影响**已登录的浏览器。⇒ 客户端**不做** `location.reload()`；重启期间只显示非阻塞横幅 + 轮询 `status`，超时才给失败态与手动刷新入口。
+结论：cookie 的签名密钥是持久化的，进程令牌每次启动重新随机**不影响**已登录的浏览器。⇒ 客户端**不做** `location.reload()`；只有失败态里用户点「刷新页面」才 reload。
 
 ## 5. 离线测试 ✅
 
 ```
 node test/restart.test.mjs          54 / 54 pass
-node test/restart-helper.test.mjs   18 / 18 pass
+node test/restart-helper.test.mjs   21 / 21 pass
+node test/host.test.mjs             28 / 28 pass
+node test/client.test.mjs           43 / 43 pass
 node test/turn-delete.test.mjs      25 / 25 pass
 node test/session-delete.test.mjs   23 / 23 pass
-node test/client.test.mjs           28 / 28 pass
-node test/host.test.mjs              8 /  8 pass
+                                    ─────────────
+                                    194 项全绿
 ```
 
-（本机沙箱下 `npm test` 的 `node --test` 会 `spawn EPERM` 假失败，所以逐个直跑，见 AGENTS.md 第 5 节。）
+（本机沙箱下 `npm test` 里的 `node --test` 会 `spawn EPERM` 假失败，所以逐个直跑，见 AGENTS.md 第 5 节。）
 
-## 6. M0 的环境事实（供排障参考）
+## 6. M6 真机端到端（一次性备用实例）✅
 
-- 本机 node 版本与 harness 自带的入口脚本路径都可以从 `/proto/status` 一类探针读到；重启不需要它们之外的任何东西。
-- 辅助进程写的中文日志**要用 UTF-8 读**，否则在本机默认编码下显示成乱码（原型观察到）。
+环境：一次性 profile（从 shipped web 模板初始化）+ `link:` 装本仓库，独立端口，与主实例完全隔离。**注意：这个实例是由命令行拉起的，不代表 DSHL 托管的形态（见第 8 节第 1 条）。**
 
-## 7. 未验证（不要当成通过）
+### 6.1 插件加载与状态接口 ✅
 
-1. **DSHL 拉起的实例没测过**（S1 的核心问题，**零证据**）：原型实例是从命令行起的，而且**它根本没有出现在 DSHL 列表里**（用户更正）——所以「DSHL 会不会杀掉脱离式辅助进程、认不认得起新进程」这几个问题一个都没被回答。已证明的只有「`detached` 子进程能活过一个普通父进程的退出」。
-   - ⇒ M6 端到端必须在 **DSHL 拉起的实例**（即主实例、本会话所在的那个）上跑一次；在那之前这条保持未验证。
-   - 附带教训：曾经把用户对**另一个实例**的观察误当成这个实例的证据，已在 SPIKE 里更正并写明「引用人工观察要连实例一起记」。
-2. **S5 续作投递整条链路**：`resolveAgent` + `prompt` 的签名已核对，M3 也实现了投递，但**没走过真实投递**。
-3. **plugin 行的 `config:`（无 schemastery schema）**：M3 用一次性 `DSH_HOME` + `--patch` 做 `--dump-config` 实测 **exit 0 且 `config: { approval: ask }` 完整保留**，并核对了 `@deepseek-ai/cordis` 的 `resolveConfig`（插件无 `Config` schema 时原样返回）；但**真实 mount 时 config 是否传进 `apply` 仍未验证**。
-4. **M3（工具注册、审批卡片、单飞、限频、状态路由）与 M4（设置页）的真机行为**：离线测试已覆盖（host 27 项、client 43 项），**真机一行都没跑过**。
-5. **`appExit` 在「有正在跑的后台任务 / 终端」时是否同样快**：原型实例是空的。
-6. **`--port 0`（OS 随机端口）** 下把实际端口钉进 argv 的做法：有离线测试（`pinPortIfNeeded`），未真机验证。
-7. **M4 的全部视觉结论**：没有一张真机截图（执行者没有浏览器），token 名与度量是从已装原生 CSS 里读出来的，明暗主题、与相邻设置页的并排对照都没做过。横幅在设置面板打开时会被挡住（z-index 20 vs 1000）——待定是否要改。
-8. **`blockers.sessions[].descendant` 与状态里的 `version`**：M4 的界面按「有就显示」写好了，但宿主目前都不发（见第 8 节的跟进项）。
+`GET /api/agent-control/restart/status` → 200：
+
+```json
+{ "ok": true, "version": "0.2.1-alpha.1-v1.1.0", "bootId": "b-…", "pid": 21952, "startedAt": …,
+  "port": 10725, "canRestart": true, "blockers": { "sessions": [], "jobs": 0 }, "pending": null, "last": null }
+```
+
+### 6.2 安全：无凭据的 POST 被拒 ✅（实测结论与计划的预期不同）
+
+| 请求 | 结果 |
+| --- | --- |
+| 无 `Origin`、无自定义头 | **401** `RESTART_DENIED`（宿主鉴权拒绝） |
+| 带浏览器 cookie + 同源 `Origin` | **202** `{ ok: true, restartId: "r-…" }` |
+
+⚠️ **计划 3.3 的预期是 403**。真正发生的是：`ctx.connection.requestRejection` 不只校验 Host/Origin，**还做浏览器鉴权**，所以「没有登录凭据」的请求在 Origin 校验之前就被 401 挡掉了。这是**更严**的结果，不是漏洞：
+
+- 界面路径（同源 + 已登录）正常；
+- 未登录/非浏览器调用者拿到 401，而不是靠一个自定义头就能放行；
+- 只有当部署里**没有** `connection` 服务时，才退回「Origin 必须等于 Host，否则必须带 `x-dsh-agent-control: 1`」的自实现。
+
+`GET /restart/status` **故意不做可信校验**：辅助进程在新进程刚起来、还没有任何凭据时就要靠它判断就绪；它只读、不改变状态（能访问该端口的人可以读到 pid / 端口 / 阻塞会话 id / 最近一次结果）。
+
+### 6.3 UI 路径的一次完整重启 ✅
+
+带 cookie 的 `POST /restart` → 202 → 服务不可达（+0.52 s）→ 新 `bootId` 可读（+5.7 s），旧 pid → 新 pid，全程无人工干预。
+
+### 6.4 模型路径 + 审批 + 续作投递（S5）✅ —— 事件序列实证
+
+用户在一个会话里让模型调用 `restart_harness`（`reason` + `resume_note`），批准审批卡片。会话日志（用只读转储器按帧解压后逐条打出）**关键片段**：
+
+```
+seq 21  tool/call        name=restart_harness
+seq 22  approval/asked   toolName=restart_harness callId=call_00_…      ← 宿主审批服务写的审计对
+seq 23  approval/decided outcome=allowed-once
+seq 24  tool/result      isError=false                                   ← 工具结果已落盘
+seq 25  step/end
+seq 26  turn/end         reason={"kind":"completed"}                     ← ★ 本轮正常结束（验收第 2 条）
+seq 27  session/end-seed
+seq 28  agent/inbox/spliced
+seq 29  turn/start       turn=2                                          ← 新进程把会话拉起来
+seq 32  user/message     "[系统通知 · DSH 已热重启] 原因：M6 验收：验证热重启 耗时：6 秒
+                          你重启前留下的续作说明：报一下你重启后看到的…"   ← ★ 续作消息（S5）
+seq 36+ （模型继续干活：pwsh 工具调用…）
+seq 49  turn/end         reason={"kind":"completed"}
+```
+
+- **没有在工具执行期间退出进程**：`tool/result` → `step/end` → `turn/end` 顺序正确，日志尾部合法。
+- **续作消息真的投出去了**，而且**带上了实测耗时（6 秒）**与模型自己写的原因/续作说明。
+- 用户观察：审批卡片出现并可批准；本轮正常结束；页面短暂不可用后**自己恢复**；同一会话收到续作通知并继续干活。
+
+### 6.5 用真实加载校验器复核 ✅
+
+```
+node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> session-38607d8e-…
+{
+  "events": 50,
+  "original": "OK",                                          ← 含重启的会话日志能被真实 v4 校验器加载
+  "legacyTombstone": "FAIL system/message does not match an open turn and step",   ← 对照组如期失败
+  "turns": { "1": "OK（遮蔽 7 个节点）", "2": "OK（遮蔽 6 个节点）" }
+}
+```
+
+`test/log-inspect.mjs` 对同一会话：25 个 zstd 帧、坏帧 0、解析失败行 0、50 条事件、两个轮次都闭合。
+
+### 6.6 `last.json` 的两次写入（**踩到并修掉一个真 bug**）⚠️→✅
+
+第一次真机重启后，设置页的「最近一次重启」**只有一个时间和 pid**：`source` / `reason` / `resume` 全丢。
+
+- 根因：`last.json` 有**两个写入者**——新进程在 `appReady` 时写「谁发起的、为什么、续作投递成不成」，辅助进程探测到就绪后写「重放结果、新 pid、耗时」。新进程就绪与辅助进程探测到就绪之间隔着一个轮询间隔，所以**辅助进程总是后写**，而它写的是**整份覆盖**，于是把新进程那几个字段冲掉了。
+- 修复：辅助进程改成**合并写**，且只在 `restartId` 相同时合并（`last.json` 跨重启复用，无条件合并会把上一次的 `resume: 'delivered'` 带到这一次）；新进程额外把 `restartId` / `source` / `reason` 一并写下来。耗时也修了一个竞态：辅助进程多半还没写，这时退回「待办创建 → 现在」，不再显示「未知」。
+- 修复后实测：`last.json` 同时含两边的字段
+
+```json
+{ "restartId": "r-muu9ld0f-srras7", "ok": true, "newPid": 12496, "bootId": "b-…",
+  "durationMs": 5914, "finishedAt": …, "logFile": "…/agent-control-restart-20261005-041331.log",
+  "source": "model", "reason": "M6 验收：验证热重启", "resume": "delivered",
+  "resumeAt": …, "sessionId": "session-38607d8e-…" }
+```
+
+### 6.7 设置页 ✅（用户确认）
+
+用户确认：**设置里能看到「热重启」页，内容正常**（运行状态、阻塞提示、「重启 DSH」按钮、「最近一次重启」）。
+⚠️ 仍缺：明/暗主题截图与与相邻原生页的并排对照（执行模型没有浏览器）。
+
+### 6.8 交接文件的清理 ✅
+
+重启稳定后 `$DSH_HOME/agent-control/restart/` 里**只剩 `last.json`**：`pending.json` 被新进程消费后删除、`spec.json`（含环境变量）用完即删。没有别的残留。
+
+### 6.9 回归：原有删除功能 ✅
+
+重启之后 `GET /api/agent-control/sessions` 与 `/restart/status` 都是 200，会话列表正常返回。
+（更细的删除实测见 `docs/VERIFY-0.2.1-alpha.1-v1.0.1.md`，本轮没有重跑全部删除用例。）
+
+## 7. 本机环境事实（供排障参考）
+
+- **沙箱下的 `node` 看到的 `os.tmpdir()` 是私有的临时目录**，与实例进程看到的真实 `%TEMP%` 不是同一个；同理 `$env:TEMP` 在沙箱里也被改写。写诊断脚本时要显式给出真实路径。
+- 会话日志是**多帧拼接**的 zstd：`createZstdDecompress()` + 整块 `end()` 在本机实测**只解出第一帧**（253 字节的会话头），要按魔数 `28 b5 2f fd` 逐帧切。
+- 实例日志里的中文要用 UTF-8 读，否则本机默认编码下显示成乱码。
+
+## 8. 未验证（不要当成通过）
+
+1. **DSHL 拉起的实例没测过**（S1 的核心问题，**零证据**）：上面所有真机结论都来自**命令行拉起**的一次性实例。DSHL 会不会杀掉脱离式辅助进程、认不认得起新进程，仍然未知。
+   - 教训：中途曾把用户对**另一个实例**的观察当成这个实例的证据，已在 SPIKE 里更正并写明「引用人工观察要连实例一起记」。
+2. **`--port 0`（OS 随机端口）**：`pinPortIfNeeded` 有离线测试，未真机验证。
+3. **计划验收里没跑到的几条**（都有离线测试，但没有真机样本）：第 7 条（另一个会话在跑 ⇒ `RESTART_BLOCKED`）、第 9 条（限频第 4 次被拒 / 同会话 60 秒冷却）、第 10 条（并发 ⇒ `RESTART_IN_PROGRESS`）、第 11 条（新进程起不来 ⇒ 失败态与日志文件名）、第 12 条（过期 pending 被丢弃）。
+4. **`appExit` 在「有正在跑的后台任务 / 终端」时是否同样快**：本轮实例是空的。
+5. **界面视觉**：没有截图对照（明/暗主题、与相邻设置页并排）；横幅在设置面板打开时被挡（`shell.overlay` 的 z-index 低于设置面板），是否要改尚未决定。
+6. **`config: { approval: ask }` 的真实 mount** 没有单独取证（只 dump 过 + 端到端里行为正常）。
+7. **`blockers.sessions[].descendant`**：状态接口**刻意不发**这个字段（状态页不排除任何会话，没有「调用者」可作参照，带了恒为假），界面里的「（子代理）」标记因此不会出现。

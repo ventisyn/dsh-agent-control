@@ -6,7 +6,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 84 项通过（v1.0.0 真机复验时是 51 项）。** 实测结论：
+> ⚠️ **现状：离线测试 194 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`SESSION_LIVE`（409）、`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）
@@ -227,8 +227,9 @@ POST /api/agent-control/restart                # { reason?, force? } → 202 { o
 - 请求体必须校验：字段存在、类型、id 形状（只允许 `[A-Za-z0-9._:-]`、拒绝 `..`）、长度上限、请求体上限 64 KiB
 - **不要在 UI 之外额外暴露批量删除**，除非当轮就想清楚误删的后果
 - 端口若绑到非回环地址（`webServer.config.host` 支持 `0.0.0.0`），等于把「删除我的会话」暴露给整个网络；文档与 README 里要写明
-- **`POST /restart` 是这里唯一会改变进程状态的接口，必须额外过可信校验**：优先用宿主公开的 `ctx.connection.requestRejection({ headers })`（它做的是宿主自己的 Host/Origin 校验，返回 401/403 就照抄）；拿不到该服务时退回自实现——`Origin` 存在时其 host 必须等于 `Host` 头，缺失 `Origin` 时必须带自定义头 `x-dsh-agent-control: 1`。缺了这道校验，任何能打开一个网页的人都能 CSRF 掉整个实例。
-- `GET /restart/status` **故意不做可信校验**：辅助进程在新进程刚起来、还没有任何凭据的时候就要靠它判断就绪。它只读、不改变任何状态，可以接受这个暴露面。
+- **`POST /restart` 是这里唯一会改变进程状态的接口，必须额外过可信校验**：优先用宿主公开的 `ctx.connection.requestRejection({ headers })`（它做的是宿主自己的 Host/Origin 校验**加浏览器鉴权**，返回 401/403 就照抄）；拿不到该服务时退回自实现——`Origin` 存在时其 host 必须等于 `Host` 头，缺失 `Origin` 时必须带自定义头 `x-dsh-agent-control: 1`。缺了这道校验，任何能打开一个网页的人都能 CSRF 掉整个实例。
+  - ⚠️ **实测（v1.1.0）**：`requestRejection` 会把「没有浏览器凭据」的请求**直接判 401**，所以回调里的自实现路径在正常部署下**根本走不到**——这不是缺陷，是比计划更严的结果：界面上同源已登录的请求照常通过，脚本/未登录调用者拿到 401 而不是靠一个自定义头就能放行。
+- `GET /restart/status` **故意不做可信校验**：辅助进程在新进程刚起来、还没有任何凭据的时候就要靠它判断就绪。它只读、不改变任何状态，可以接受这个暴露面（能访问端口的人能读到 pid / 端口 / 阻塞会话 id / 最近一次结果）。
 
 **路由注册必须把 disposer 返回出去**（`ctx.effect(() => ctx.webServer.register({...}))`）：`register` 对重复 `(kind, path)` 会抛错；如果注册写成返回 `undefined` 的箭头函数，注销就完全靠 fiber 卸载——重复 `apply` 会撞上（第 4 节）。
 
@@ -280,6 +281,34 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 `docs/VERIFY-*.md` 记录每次实测（第 9 节），那是给人和代理看的文档，不是运行时数据。
 
 **客户端这一面本文件写得最薄，是刻意的**：槽位种类、owner props、`ClientSessions` 的真实成员、可用图标名，全都要在**活页面上**核对（`cordis_inspect_query` 的 `Slots.listSubTree`、浏览器控制台、primitives 的导出名单）。本文件里凡是没标「已核对 / 已实测」的客户端说法，都只当线索，不要当契约。
+
+### 3.9 热重启（已实现）
+
+**动机**：DSH 没有内置重启，而 host 端模块不会热加载（坑 ⑦）——改了宿主插件就必须重启进程，而重启会打断正在做的事。热重启把这件事收进同一个插件：**模型可以请求重启并在重启后自动继续**，用户也可以在设置页点一次（`docs/adr/0001-hot-restart-via-detached-helper.md` 记了为什么是「脱离式辅助进程」）。
+
+**唯一入口是 `requestRestart`**（`src/restart-tool.mjs`）：模型工具 `restart_harness` 与 `POST /restart` 走同一条路径，守卫、限频、审批、时序完全一致。
+
+```
+模型路径：守卫 → 审批 → 写 pending → 返回工具结果 + concludeTurn()
+   → 后台任务：whenIdle(≤30s) → flush===true → 复查阻塞项 → spec.json → spawn(detached) → appExit(0)
+界面路径：同样的守卫（不审批——点按钮本身就是授权）→ 写 pending → 202 → 同一个后台任务
+```
+
+**绝不能违反的三条**：
+
+1. **绝不在工具执行期间退出进程**：工具调用没有对应结果就进程死亡，日志尾部不合法（坑 ⑪）。所以工具**先返回结果**，退出由后台任务在双门之后执行。
+2. **`flush` 不为 `true` 就不退出**——宁可这次不重启，也不能写坏日志尾部；这种情况走取消路径并如实通知会话。
+3. **`force` 只跳过阻塞项**：单飞与预检永不跳过（预检不过 ⇒ `RESTART_UNSUPPORTED`，绝不因为「辅助进程会兜底」就放行）。
+
+**辅助进程**（`src/restart-helper.mjs`）活在旧进程之外：等旧 pid 退出（超时→硬杀）→ 等端口释放 → 按重放规格起新进程（**stdio 只能是 `'ignore'` 或文件描述符**）→ 轮询 `/restart/status` 等 `bootId` 变化 → 写 `last.json`。它**只认文件**，不 import 本仓库任何模块。
+
+**新进程**在应用就绪后读 `pending.json`：过期（>10 分钟）丢弃并 warn → **先删 pending**（至多投递一次）→ `sessionController.resolveAgent` + `prompt` 投递续作消息 → 结果合并写进 `last.json`。界面发起的重启没有要续作的会话，只记 `resume: 'none'`。
+
+⚠️ **`last.json` 有两个写入者**（新进程写「谁发起的 / 为什么 / 续作成不成」，辅助进程写「重放结果 / 新 pid / 耗时」），两边都必须**合并写**，且辅助进程只在 `restartId` 相同时合并——这份文件跨重启复用，无条件合并会把上一次的结果带过来。真机踩过一次：辅助进程整份覆盖，设置页的「最近一次重启」就只剩时间和 pid。
+
+**已知限制（必须如实写进文档，不许假装统计全了）**：宿主的作业列表**按所有者隔离**（`jobs.list(caller)` 只给调用者自己的 + 无主作业），所以「后台任务在跑」这一项**看不到别的会话启动的任务**；别的会话只能靠 agent 的 `running` 状态发现。
+
+**界面**：设置页一页（`settings.section`，id `agent-control-restart`）+ `shell.overlay` 里的**非阻塞横幅**。⚠️ **不做自动 `location.reload()`**——S4 实测页面会自己恢复；只有失败态里用户点「刷新页面」才 reload。横幅在设置面板打开时会被挡住（overlay 的 z-index 低于面板），进度此时显示在设置页那一行里。
 
 ## 4. 与 DSH 版本的耦合点 ⚠️
 
