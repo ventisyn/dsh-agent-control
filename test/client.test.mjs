@@ -26,6 +26,8 @@ const hookCalls = []
 let lastCleanup
 /** 渲染期间派发的删除请求。 */
 const dispatched = []
+/** 派发过的事件类型（`dispatched` 只记 detail，重启事件没有 detail）。 */
+const dispatchedTypes = []
 
 const loaded = { id: undefined, apply: undefined, inject: undefined }
 
@@ -55,6 +57,7 @@ globalThis.window = {
   removeEventListener() {},
   dispatchEvent(event) {
     dispatched.push(event.detail)
+    dispatchedTypes.push(event.type)
   },
   location: { reload() {} },
 }
@@ -194,6 +197,18 @@ const primitivesStub = {
       return { type: 'risk-confirmation', props }
     }
   },
+  get Button() {
+    if (!primitivesAccess.includes('Button')) primitivesAccess.push('Button')
+    return function Button(props) {
+      return { type: 'button-primitive', props }
+    }
+  },
+  get IconRefreshOutlineRegular() {
+    if (!primitivesAccess.includes('IconRefreshOutlineRegular')) primitivesAccess.push('IconRefreshOutlineRegular')
+    return function IconRefreshOutlineRegular(props) {
+      return { type: 'icon-refresh', props }
+    }
+  },
 }
 
 /** 记录注册进来的槽位条目。 */
@@ -309,21 +324,29 @@ test('bundle 用插件 id 注册，并导出 apply / inject', () => {
 
 test('factory 只 require 声明过的模块，且用到的导出名都取到了', () => {
   assert.deepEqual(requireCalls, ['react', '@deepseek-ai/dsh-client-ui-primitives'])
-  assert.deepEqual(primitivesAccess.sort(), ['IconTrashOutlineRegular', 'MenuItemButton', 'RiskConfirmation', 'Tooltip'])
+  assert.deepEqual(primitivesAccess.sort(), [
+    'Button',
+    'IconRefreshOutlineRegular',
+    'IconTrashOutlineRegular',
+    'MenuItemButton',
+    'RiskConfirmation',
+    'Tooltip',
+  ])
 })
 
-test('apply 注册四个槽位，且每个 list 槽位都带 id', () => {
+test('apply 注册五个槽位，且每个 list 槽位都带 id', () => {
   loaded.apply(makeContext())
 
   assert.deepEqual(slotInjections.sort(), [
     'conversation.chat.assistant-actions',
     'conversation.chat.turnTail',
+    'settings.section',
     'shell.overlay',
     'sidebar.workspaces.session.menu.item',
   ])
   assert.deepEqual(serviceInjections.sort(), ['locale', 'sessions'], '服务注入走 ctx.inject')
 
-  assert.equal(registrations.length, 4)
+  assert.equal(registrations.length, 5)
   for (const entry of registrations) {
     assert.equal(entry.options.name, entry.name, 'register 的 name 必须与 inject 的槽位一致')
     assert.equal(typeof entry.options.id, 'string', `${entry.name} 是 list 槽位，必须有 id`)
@@ -1247,5 +1270,579 @@ test('DELETE_FAILED 原样显示宿主的原因，绝不说成「任务正在运
   assert.ok(description.includes('宿主拒绝了这次删除'), '★ 必须用 error.DELETE_FAILED 的文案')
   assert.ok(description.includes('的目录没有删净'), '★ 必须带上宿主给的原始原因，不能吞成笼统失败')
   assert.ok(!description.includes('任务正在运行'), '★ 绝不能显示成「任务正在运行」')
+})
+
+// ---------------------------------------------------------------------------
+// 热重启（M4）：槽位注册形状、态机纯函数、组件构造、非阻塞横幅
+// ---------------------------------------------------------------------------
+
+/** 取 bundle 暴露的重启排障抓手（和 `syncTurnRows` 一样，必须在 `load()` 之后读）。 */
+function restartApi() {
+  const expose = globalThis.window.__dshAgentControl
+  assert.ok(expose?.restart, 'bundle 必须暴露 window.__dshAgentControl.restart')
+  return expose.restart
+}
+
+/** 成功的 host 响应。 */
+const okPayload = (payload) => ({ ok: true, status: 200, json: async () => payload })
+
+/** 按类名找元素（重启用的是注入样式表的类名，断言它们比断言下标稳）。 */
+function findByClass(node, className) {
+  // 按 CSS 的语义匹配单个类：兜底按钮会把「自己的类名」和传进来的类名拼在一起
+  // （`dsh-agent-control-button dsh-agent-control-danger`），整体字符串比对会漏掉它。
+  return findElement(node, (element) => String(element.props?.className ?? '').split(/\s+/).includes(className))
+}
+
+/** 收集假元素树里的全部文本。 */
+function collectText(node, out = []) {
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push(String(node))
+    return out
+  }
+  if (node === null || node === undefined || typeof node !== 'object') return out
+  for (const child of Array.isArray(node.children) ? node.children : []) collectText(child, out)
+  return out
+}
+
+/**
+ * 把模块级重启状态的变化推给已挂载的组件。
+ *
+ * 真机里这条链路是「dispatchRestart → 广播事件 → 订阅者 setState」；假 React 不会自己
+ * 跑订阅回调，所以测试要手动喂一次——顺带也钉住了事件名与「组件必须订阅」这件事。
+ */
+function broadcastRestartChanged(listeners) {
+  const handlers = listeners
+    .filter((item) => item.type === 'dsh-agent-control:restart-changed')
+    .map((item) => item.handler)
+  assert.ok(handlers.length > 0, '组件必须订阅 dsh-agent-control:restart-changed')
+  // 真机里一次广播会送到**每一个**订阅者（设置页与浮层各一份），这里照做，
+  // 否则「只喂了最后注册的那个」会让另一棵树停在旧状态，测出来的东西是假的。
+  for (const handler of handlers) handler({ detail: restartApi().snapshot() })
+}
+
+test('设置页注册成 settings.section（list 槽位：id 必填、order 排在原生页之后、label 是 thunk）', () => {
+  loaded.apply(makeContext())
+  const entry = registrations.find((item) => item.name === 'settings.section')
+  assert.ok(entry, '必须注册设置页槽位')
+  assert.equal(entry.options.id, 'agent-control-restart', '槽位 id 用独立的一格，绝不顶掉原生页')
+  assert.equal(entry.options.name, 'settings.section')
+  // 原生页签顺序：account -10 / general 0 / models 10 / plugins 15 / agent-presets 20。
+  assert.ok(entry.options.order > 20, '附加页要排在原生页之后')
+  assert.equal('select' in entry.options, false, 'list 槽位不能用 select')
+  assert.equal(typeof entry.options.label, 'function', 'label 用 thunk：宿主每次投影都重读，跟得上语言')
+  const label = entry.options.label()
+  assert.equal(typeof label, 'string')
+  assert.ok(label.length > 0, '页签名不能是空串（导航上会是一行空白）')
+  assert.equal(entry.options.label(), label, 'thunk 必须可以重复读取')
+  assert.equal(typeof entry.component, 'function')
+})
+
+test('重启态机：idle → confirming → requested → shutting-down → starting → reconnecting → done', () => {
+  const { initial, next, constants } = restartApi()
+  assert.deepEqual(constants, { pollIntervalMs: 1000, timeoutMs: 120000, reconnectAfterMs: 8000 })
+
+  let state = initial()
+  assert.equal(state.phase, 'idle')
+
+  state = next(state, { type: 'confirm' })
+  assert.equal(state.phase, 'confirming')
+  state = next(state, { type: 'submit' })
+  assert.equal(state.phase, 'requested')
+  state = next(state, { type: 'accepted', restartId: 'r-1', at: 100000 })
+  assert.equal(state.phase, 'shutting-down')
+  assert.equal(state.restartId, 'r-1')
+
+  // 宿主还在应答，pending 里就是这次重启 ⇒ 仍然说「正在关闭」
+  state = next(state, {
+    type: 'status',
+    at: 101000,
+    payload: {
+      ok: true,
+      bootId: 'boot-old',
+      pid: 100,
+      pending: { restartId: 'r-1', createdAt: new Date(100000).toISOString() },
+    },
+  })
+  assert.equal(state.phase, 'shutting-down')
+  assert.equal(state.waitMs, 1000)
+
+  // 连不上了：先 starting，久一点 reconnecting；全程没有错误
+  state = next(state, { type: 'status-failed', at: 102000 })
+  assert.equal(state.phase, 'starting')
+  assert.equal(state.error, null, '★ 重启期间网络不通不是错误，不能渲染成红色失败')
+  state = next(state, { type: 'status-failed', at: 105000 })
+  assert.equal(state.phase, 'starting', '还没到分界点仍然说「正在启动」')
+  assert.equal(state.failures, 2)
+  state = next(state, { type: 'status-failed', at: 110000 })
+  assert.equal(state.phase, 'reconnecting', '断连超过分界点改说「正在等待重新连上」')
+
+  // 新进程回来了：bootId 变了 ⇒ done，等待时长定格
+  state = next(state, {
+    type: 'status',
+    at: 111000,
+    payload: { ok: true, bootId: 'boot-new', pid: 200, pending: null },
+  })
+  assert.equal(state.phase, 'done')
+  assert.equal(state.bootId, 'boot-new')
+  assert.equal(state.waitMs, 11000)
+  assert.equal(state.error, null)
+})
+
+test('重启态机：120 秒还等不到新进程就进 failed（不无限转圈，也不假装成功）', () => {
+  const { initial, next } = restartApi()
+  let state = initial()
+  for (const event of [
+    { type: 'confirm' },
+    { type: 'submit' },
+    { type: 'accepted', restartId: 'r-2', at: 1000 },
+  ]) {
+    state = next(state, event)
+  }
+
+  state = next(state, { type: 'status-failed', at: 5000 })
+  assert.equal(state.phase, 'starting', '等了 4 秒：还在启动')
+
+  state = next(state, { type: 'status-failed', at: 121000 })
+  assert.equal(state.phase, 'failed', '★ 满 120 秒必须落定成失败态')
+  assert.equal(state.error?.code, 'RESTART_TIMEOUT')
+  assert.equal(state.waitMs, 120000)
+  // 落定之后再失败也不会乱跳（阶段已经是终态）
+  assert.equal(next(state, { type: 'status-failed', at: 200000 }).phase, 'failed')
+})
+
+test('重启态机：重启进行中重复提交 / 重复点主按钮都被拒（引用相等 = 无动作、不重渲染）', () => {
+  const { initial, next } = restartApi()
+  let state = next(initial(), { type: 'confirm' })
+  state = next(state, { type: 'submit' })
+  const accepted = next(state, { type: 'accepted', restartId: 'r-3', at: 1000 })
+  for (const event of [
+    { type: 'submit' },
+    { type: 'confirm' },
+    { type: 'accepted', restartId: 'r-4', at: 2000 },
+  ]) {
+    assert.equal(next(accepted, event), accepted, `★ 重启进行中的 ${event.type} 必须原样返回`)
+  }
+  const watching = next(accepted, { type: 'status-failed', at: 3000 })
+  assert.equal(next(watching, { type: 'submit' }), watching)
+  assert.equal(next(watching, { type: 'cancel' }), watching, '等新进程期间不能被取消掉')
+})
+
+test('重启态机：被拒退回确认态并带上原因；取消 / 关掉提示 / 重置都回到 idle', () => {
+  const { initial, next } = restartApi()
+  let state = next(initial(), { type: 'confirm' })
+  state = next(state, { type: 'submit' })
+  state = next(state, { type: 'rejected', code: 'RESTART_BLOCKED', message: '另有 2 个会话在运行', at: 1000 })
+  assert.equal(state.phase, 'confirming', '被拒不是「重启失败」：宿主还好好的，原因留在弹窗里')
+  assert.equal(state.error?.code, 'RESTART_BLOCKED')
+  assert.equal(state.error?.message, '另有 2 个会话在运行')
+
+  const cancelled = next(state, { type: 'cancel' })
+  assert.equal(cancelled.phase, 'idle')
+  assert.equal(cancelled.error, null)
+
+  // 连错误码都没有（请求根本没发出去）：也必须给重启自己的兜底码，不能落进删除的文案
+  const noCode = next(next(next(initial(), { type: 'confirm' }), { type: 'submit' }), { type: 'rejected', at: 1 })
+  assert.equal(noCode.error?.code, 'RESTART_REQUEST_FAILED')
+
+  const failed = { ...initial(), phase: 'failed', error: { code: 'RESTART_TIMEOUT', message: '' } }
+  assert.equal(next(failed, { type: 'dismiss' }).phase, 'idle', '失败提示要能关掉')
+  const done = { ...initial(), phase: 'done' }
+  assert.equal(next(done, { type: 'dismiss' }).phase, 'idle')
+  assert.deepEqual(next(done, { type: 'reset' }), initial())
+  // 认不出的事件原样返回（引用相等 ⇒ 不广播、不重渲染）
+  assert.equal(next(state, { type: 'nonsense' }), state)
+})
+
+test('重启态机：第一次读到 bootId 只是「记下」；pending 一出现就跟着进重启中（模型发起的重启）', () => {
+  const { initial, next } = restartApi()
+  let state = next(initial(), {
+    type: 'status',
+    at: 1000,
+    payload: { ok: true, bootId: 'boot-a', pid: 10, pending: null },
+  })
+  assert.equal(state.phase, 'idle', '第一次读到 bootId 不能被误判成「换了新进程」')
+  assert.equal(state.bootId, 'boot-a')
+  assert.equal(state.pid, 10)
+
+  state = next(state, {
+    type: 'status',
+    at: 2000,
+    payload: {
+      ok: true,
+      bootId: 'boot-a',
+      pid: 10,
+      pending: { restartId: 'r-9', state: 'scheduled', source: 'model', createdAt: new Date(1000).toISOString() },
+    },
+  })
+  assert.equal(state.phase, 'shutting-down', '★ 别人的重启也要看得见（横幅靠这条）')
+  assert.equal(state.restartId, 'r-9')
+  assert.equal(state.acceptedAt, 1000, '用 pending.createdAt 当起点，等待秒数才不是编的')
+
+  // 宿主万一没给 bootId：pid 变了同样能判出「换了进程」
+  const legacy = next(
+    { ...initial(), phase: 'reconnecting', pid: 10, acceptedAt: 1000 },
+    { type: 'status', at: 3000, payload: { ok: true, pid: 11, pending: null } },
+  )
+  assert.equal(legacy.phase, 'done')
+})
+
+test('重启设置页：画出运行状态、阻塞项、危险态主按钮与「最近一次重启」', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    version: '0.2.1-alpha.1-v1.1.0',
+    bootId: 'boot1234567890',
+    pid: 4242,
+    startedAt: new Date(Date.now() - 125000).toISOString(),
+    port: 10727,
+    canRestart: true,
+    blockers: { sessions: [{ sessionId: 'session-1', title: '正在跑长任务的会话', descendant: true }], jobs: 2 },
+    pending: null,
+    last: {
+      restartId: 'r-1',
+      ok: true,
+      finishedAt: Date.now() - 60000,
+      durationMs: 6200,
+      source: 'ui',
+      reason: '用户在设置页点了「重启 DSH」',
+      resume: 'delivered',
+    },
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+
+  // 首帧：状态还没回来也必须画得出来（不能整页空白），并给一句「正在读取」
+  const first = renderComponent(section.component, {})
+  assert.notEqual(first, null, '拿不到状态也必须渲染')
+  assert.ok(findByClass(first, 'dsh-agent-control-hint'), '没拿到状态时给一句提示')
+  const main = findByClass(first, 'dsh-agent-control-danger')
+  assert.ok(main, '主按钮必须画出来')
+  assert.equal(main.type.name, 'Button', '用原生 Button（危险态靠 token 改写，不自造色值）')
+  assert.equal(main.props.icon?.type?.name, 'IconRefreshOutlineRegular', '拿到原生图标就必须用上')
+  assert.equal(main.props.disabled, false, '读不到 canRestart 时不预先禁用：让宿主裁决')
+
+  // 挂载时那次请求会被节流跳过，这里强制拉一次并广播（模拟真机里的重渲染）
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(section.component, {})
+  const text = collectText(tree).join('\n')
+  assert.ok(text.includes('0.2.1-alpha.1-v1.1.0'), '要显示版本')
+  assert.ok(text.includes('4242'), '要显示进程号')
+  assert.ok(text.includes('10727'), '要显示端口')
+  assert.ok(text.includes('2 分 5 秒'), '要显示已运行时长')
+  assert.ok(text.includes('boot1234…'), '★ bootId 只显示简写')
+  assert.ok(text.includes('正在跑长任务的会话'), '★ 阻塞项要列出会话标题')
+  assert.ok(text.includes('（子代理）'), '子代理会话要标出来')
+  assert.ok(text.includes('后台任务：2'), '后台任务要给数量')
+  assert.ok(text.includes('用户'), '最近一次重启要显示来源')
+  assert.ok(text.includes('6 秒'), '要显示耗时')
+  assert.ok(text.includes('已自动续上'), '要显示续作结果（三态之一）')
+  assert.equal(findByClass(tree, 'dsh-agent-control-danger').props.disabled, false)
+  restartApi().reset()
+})
+
+test('宿主说不能重启时：主按钮禁用，并原样显示它给出的原因', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    bootId: 'boot-a',
+    pid: 1,
+    canRestart: false,
+    unsupportedReason: '取不到启动规格：拿不到 dsh 的入口脚本',
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+  renderComponent(section.component, {})
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(section.component, {})
+  assert.equal(findByClass(tree, 'dsh-agent-control-danger').props.disabled, true, '★ 不能重启时按钮必须禁用')
+  assert.ok(
+    collectText(tree).join('\n').includes('取不到启动规格：拿不到 dsh 的入口脚本'),
+    '★ 必须原样显示宿主给的原因，不能自己编一句',
+  )
+  restartApi().reset()
+})
+
+test('主按钮只派发 request-restart，确认框由同一个 overlay 宿主渲染（不新开槽位）', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({ ok: true, bootId: 'boot-a', pid: 1, pending: null }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  assert.equal(
+    registrations.filter((entry) => entry.name === 'shell.overlay').length,
+    1,
+    '★ overlay 只能有一条注册：删除与重启共用同一个弹窗宿主',
+  )
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  assert.equal(renderComponent(overlay.component, { t: (key) => key }), null, '闲着的时候什么都不渲染')
+  const onRestartRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-restart')?.handler
+  assert.equal(typeof onRestartRequest, 'function', '宿主必须监听 request-restart')
+
+  // 设置页的主按钮：只派发意图，不改状态
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+  const main = findByClass(renderComponent(section.component, {}), 'dsh-agent-control-danger')
+  assert.ok(main, '设置页必须有危险态主按钮')
+  dispatchedTypes.length = 0
+  main.props.onClick()
+  assert.deepEqual(dispatchedTypes, ['dsh-agent-control:request-restart'], '★ 按钮只派发重启请求')
+  assert.equal(restartApi().snapshot().phase, 'idle', '派发本身不改状态')
+
+  // 宿主收到请求 → 渲染确认框
+  onRestartRequest()
+  broadcastRestartChanged(browser.listeners)
+  const opened = renderUntilStable(overlay.component, { t: (key) => key })
+  const confirmBox = findElement(opened, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(confirmBox, '★ 确认框必须由同一个 overlay 宿主渲染')
+  assert.equal(confirmBox.props.open, true)
+  assert.equal(confirmBox.props.title, 'restart.dialog.title')
+  const description = String(confirmBox.props.description ?? '')
+  assert.ok(description.includes('restart.dialog.body'), '正文要写清会中断任务、页面会短暂不可用')
+  assert.equal(confirmBox.props.disabled, false)
+  assert.equal(restartApi().snapshot().phase, 'confirming')
+
+  // 提交中：按钮显示进度并禁用（不允许重复提交），也不能取消掉
+  restartApi().dispatch({ type: 'submit' })
+  broadcastRestartChanged(browser.listeners)
+  const submitting = renderUntilStable(overlay.component, { t: (key) => key })
+  const submittingBox = findElement(submitting, (element) => element.type?.name === 'RiskConfirmation')
+  assert.equal(submittingBox.props.disabled, true, '★ 提交中必须禁用确认按钮')
+  assert.equal(submittingBox.props.confirmLabel, 'restart.dialog.working', '提交中要显示进度')
+  submittingBox.props.onCancel()
+  assert.equal(restartApi().snapshot().phase, 'requested', '★ 提交中不允许取消把阶段拉回去')
+  restartApi().reset()
+})
+
+test('提交被拒：宿主的原因留在弹窗里，阶段退回确认态（绝不假装重启已经成功）', async (t) => {
+  const browser = captureBrowser(t, (url) => {
+    // ⚠️ `/restart/status` 也含 `/restart`，先判 status。
+    if (!url.includes('/restart/status') && url.includes('/restart')) {
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({ ok: false, error: { code: 'RESTART_BLOCKED', message: '另有 2 个会话在运行' } }),
+      }
+    }
+    return okPayload({
+      ok: true,
+      bootId: 'boot-a',
+      pid: 1,
+      canRestart: true,
+      blockers: { sessions: [{ sessionId: 'session-2', title: '长任务会话' }], jobs: 0 },
+      pending: null,
+    })
+  })
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, { t: (key) => key })
+  await restartApi().poll({ force: true })
+  await flush()
+
+  const onRestartRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-restart')?.handler
+  onRestartRequest()
+  await restartApi().submit()
+  await flush()
+
+  const state = restartApi().snapshot()
+  assert.equal(state.phase, 'confirming', '★ 被拒不是「重启失败」：宿主还好好的，弹窗留着')
+  assert.equal(state.error?.code, 'RESTART_BLOCKED')
+
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(overlay.component, { t: (key) => key })
+  const confirmBox = findElement(tree, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(confirmBox, '被拒后弹窗必须还在')
+  const description = String(confirmBox.props.description ?? '')
+  assert.ok(description.includes('现在不能重启'), '★ 必须用 error.RESTART_BLOCKED 的文案（错误提示走插件自己的词表）')
+  assert.ok(description.includes('另有 2 个会话在运行'), '★ 必须带上宿主给的原始原因')
+  assert.ok(description.includes('长任务会话'), '弹窗里要带上阻塞项明细')
+  restartApi().reset()
+})
+
+test('提交时网络就不通：说「重启请求没有发出去」，不能说成「删除失败」', async (t) => {
+  const browser = captureBrowser(t, () => {
+    throw new Error('Failed to fetch')
+  })
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  // 不传 t：走插件自己的词表（中文），断言的才是用户真看到的文案。
+  renderComponent(overlay.component, {})
+  const onRestartRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-restart')?.handler
+  assert.equal(typeof onRestartRequest, 'function', '宿主必须监听 request-restart')
+  onRestartRequest()
+  await restartApi().submit()
+  await flush()
+  const state = restartApi().snapshot()
+  assert.equal(state.phase, 'confirming')
+  assert.equal(state.error?.code, 'RESTART_REQUEST_FAILED', '★ 没有宿主错误码时用重启自己的兜底码')
+
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(overlay.component, {})
+  const confirmBox = findElement(tree, (element) => element.type?.name === 'RiskConfirmation')
+  const description = String(confirmBox.props.description ?? '')
+  assert.ok(description.includes('重启请求没有发出去'), '★ 文案必须是「重启」，不能落进删除的兜底文案')
+  assert.ok(description.includes('Failed to fetch'), '原始信息不能吞掉')
+  assert.ok(!description.includes('删除失败'), '★ 绝不能说成「删除失败」')
+  restartApi().reset()
+})
+
+test('重启横幅：非阻塞卡片在重启期间显示，bootId 一变就收起并进 done（绝不自动刷新页面）', async (t) => {
+  const reload = captureReload(t)
+  const browser = captureBrowser(t, () => okPayload({ ok: true, bootId: 'boot-old', pid: 100, pending: null }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, { t: (key) => key })
+  // 先让页面认下旧进程（否则第一次读到的 bootId 会被当成「就是它」）
+  await restartApi().poll({ force: true })
+  await flush()
+  assert.equal(restartApi().snapshot().bootId, 'boot-old')
+
+  restartApi().dispatch({ type: 'confirm' })
+  restartApi().dispatch({ type: 'submit' })
+  restartApi().dispatch({ type: 'accepted', restartId: 'r-1', at: Date.now() })
+  restartApi().dispatch({ type: 'status-failed', at: Date.now() + 1000 })
+  broadcastRestartChanged(browser.listeners)
+  const running = renderUntilStable(overlay.component, { t: (key) => key })
+  const banner = findByClass(running, 'dsh-agent-control-banner')
+  assert.ok(banner, '★ 重启期间必须有横幅')
+  assert.equal(banner.props.role, 'status')
+  const card = findByClass(banner, 'dsh-agent-control-banner-card')
+  assert.ok(card, '横幅是一张卡片（不是盖住整页的层）')
+  assert.ok(
+    collectText(card).join('\n').includes('restart.banner.wait'),
+    '横幅要显示已等待秒数',
+  )
+  assert.equal(reload.reloads, 0, '★ 重启期间绝不自动刷新页面（SPIKE S4：页面会自己恢复）')
+
+  // 新进程回来了：bootId 变了 ⇒ done，横幅收起
+  restartApi().dispatch({
+    type: 'status',
+    at: Date.now() + 9000,
+    payload: { ok: true, bootId: 'boot-new', pid: 200, pending: null },
+  })
+  assert.equal(restartApi().snapshot().phase, 'done')
+  broadcastRestartChanged(browser.listeners)
+  const settled = renderUntilStable(overlay.component, { t: (key) => key })
+  assert.equal(findByClass(settled, 'dsh-agent-control-banner'), undefined, '★ bootId 变化后横幅必须收起')
+  assert.equal(reload.reloads, 0, '★ 恢复靠页面自己重连，我们不刷它')
+  restartApi().reset()
+})
+
+test('超时失败：横幅给失败态与手动刷新入口（刷新只由用户点）', async (t) => {
+  const reload = captureReload(t)
+  const browser = captureBrowser(t, () => {
+    throw new Error('ECONNREFUSED')
+  })
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, { t: (key) => key })
+  restartApi().dispatch({ type: 'confirm' })
+  restartApi().dispatch({ type: 'submit' })
+  restartApi().dispatch({ type: 'accepted', restartId: 'r-5', at: 1000 })
+  restartApi().dispatch({ type: 'status-failed', at: 2000 })
+  assert.equal(restartApi().snapshot().phase, 'starting', '断连只是「正在启动」，不是错误')
+
+  restartApi().dispatch({ type: 'status-failed', at: 121000 })
+  assert.equal(restartApi().snapshot().phase, 'failed')
+  broadcastRestartChanged(browser.listeners)
+  const failed = renderUntilStable(overlay.component, { t: (key) => key })
+  const card = findByClass(failed, 'dsh-agent-control-banner-card')
+  assert.ok(card, '失败后横幅仍然可见（否则用户看不到失败与入口）')
+  assert.ok(
+    collectText(card).join('\n').includes('restart.banner.failedDetail'),
+    '失败态要写清「连不上」与「怎么办」',
+  )
+  const refreshButton = findElement(
+    failed,
+    (element) => element.type?.name === 'Button' && element.children?.[0] === 'restart.refresh',
+  )
+  assert.ok(refreshButton, '★ 失败态必须给手动刷新入口')
+  assert.equal(reload.reloads, 0, '给入口不等于自己刷新')
+  refreshButton.props.onClick()
+  assert.equal(reload.reloads, 1, '用户点了才刷新')
+  restartApi().reset()
+})
+
+test('原生 Button / 刷新图标拿不到时有兜底，且兜底按钮仍然可点、可禁用', () => {
+  const exposes = globalThis.window.__dshAgentControl
+  assert.equal(exposes.usingNativeButton(), true, 'primitives 在的时候主按钮走原生 Button')
+  const { FallbackButton, FallbackRefreshIcon } = exposes.fallbacks
+  assert.equal(typeof FallbackButton, 'function')
+  assert.equal(typeof FallbackRefreshIcon, 'function')
+
+  const icon = FallbackRefreshIcon({ size: 16 })
+  assert.equal(icon.type, 'svg', '兜底图标是内联 svg，不依赖任何包')
+  assert.equal(icon.props.width, 16)
+
+  let clicks = 0
+  const button = FallbackButton({
+    variant: 'primary',
+    className: 'dsh-agent-control-danger',
+    icon,
+    onClick: () => { clicks += 1 },
+    children: '重启 DSH',
+  })
+  assert.equal(button.type, 'button', '兜底必须是一个真正的 button，不是装作按钮的 div')
+  assert.equal(button.props.type, 'button')
+  assert.equal(button.props.disabled, false)
+  assert.match(button.props.className, /dsh-agent-control-button/, '兜底按钮带自己的类名（度量照抄原生）')
+  assert.match(button.props.className, /dsh-agent-control-danger/, '危险态类名照旧传下去（token 改写在那里）')
+  button.props.onClick()
+  assert.equal(clicks, 1, '功能不能因为拿不到原生原语就丢')
+  assert.equal(button.children[0], icon)
+  assert.equal(button.children[1], '重启 DSH')
+
+  const disabled = FallbackButton({ disabled: true, children: '正在重启…' })
+  assert.equal(disabled.props.disabled, true, '禁用态要落到原生 disabled 上，不只是样式')
+})
+
+test('整段 bundle 在拿不到原生原语时仍然加载得起来，主按钮退回自带按钮（AGENTS 3.7）', async () => {
+  // 这是「新增的每一处 require 解构」里最要紧的一条：`require` 失败不能让整个插件消失
+  // （真发生过：界面上什么都不出现、也没有报错）。所以真的重新加载一次 bundle，
+  // 让 primitives 直接抛错，再看注册与渲染是不是照常。
+  const originalLoader = globalThis.window.__ModuleLoader__
+  const originalExpose = globalThis.window.__dshAgentControl
+  let fallbackApply
+  globalThis.window.__ModuleLoader__ = {
+    load(spec) {
+      const exports = spec.factory((id) => {
+        if (id === 'react') return fakeReact
+        throw new Error(`拿不到模块：${id}`)
+      })
+      fallbackApply = exports.apply
+    },
+  }
+  try {
+    const url = `${pathToFileURL(path.join(process.cwd(), 'client.js')).href}?no-primitives`
+    await import(url)
+    assert.equal(typeof fallbackApply, 'function', '拿不到原生原语也必须加载得起来')
+
+    fallbackApply(makeContext())
+    const section = registrations.find((entry) => entry.name === 'settings.section')
+    assert.ok(section, '设置页照常注册')
+    const tree = renderComponent(section.component, {})
+    assert.notEqual(tree, null, '照常渲染')
+    const main = findByClass(tree, 'dsh-agent-control-danger')
+    assert.ok(main, '主按钮照常画出来')
+    assert.equal(main.type, 'button', '★ 退回自带 button（不是崩掉，也不是空白）')
+    assert.equal(
+      globalThis.window.__dshAgentControl.usingNativeButton(),
+      false,
+      '排障抓手要如实报告这次用的是兜底按钮',
+    )
+    assert.match(main.props.className, /dsh-agent-control-button/, '兜底按钮带自己的类名（度量照抄原生）')
+    assert.equal(main.children[0].type?.name, 'FallbackRefreshIcon', '图标也退回自带的那个（内联 SVG）')
+    assert.equal(main.children[1], '重启 DSH', '文案照旧')
+  } finally {
+    globalThis.window.__ModuleLoader__ = originalLoader
+    globalThis.window.__dshAgentControl = originalExpose
+  }
 })
 
