@@ -371,7 +371,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 
 ```sh
 # git 引用（正式）
-dsh plugin --profile <profile 名> add github:<owner>/dsh-agent-control#<已发布的完整版本号>
+dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#<已发布的完整版本号>
 
 # 本地链接（开发期更快，改完重启/热加载即生效）
 dsh plugin --profile <profile 名> add link:<本地 clone 路径>
@@ -464,7 +464,7 @@ chore: bump version to 0.2.0-rc.2-v1.0.1
 - **自建路由没有鉴权**（3.5）：请求体必须校验，不得提供未加确认的批量删除；不得把删除能力开放给 agent 工具而没有任何护栏。
 - 删除目标必须在**执行前**重新解析并确认（路径真实存在、与会话 id 对得上），不要相信请求里传来的路径。
 - 不要把 token / 凭据写进代码、日志或提交，需要凭据时用 `git credential fill` 之类方式**只在内存里传递**。
-- 本文件、`README`、`docs/` 里不写本机信息（见第 5 节），用 `<owner>`、`<profile 名>`、`<本地 clone 路径>` 这类占位符。
+- 本文件、`README`、`docs/` 里不写本机信息（见第 5 节）：路径、profile 名、实例名、端口一律用 `<profile 名>`、`<本地 clone 路径>` 这类占位符。**仓库 owner 是例外**——它已经写在公开的仓库地址里，安装命令写真实的 `ventisyn` 才能直接复制执行。
 - 不要提交 `*.bak-*`、`node_modules`、`AGENTS.local.md` 与本地 profile 产物。
 
 ## 9. 改完自检清单
@@ -556,7 +556,7 @@ git push origin --tags
 gh release create release/<目标完整版本号> --title "<目标完整版本号>" --notes-file <说明.md>
 
 # ② 把 GitHub 默认分支移到新版本：仓库首页与 git clone 默认取的就是它；默认分支也无法被 --delete。
-gh api -X PATCH repos/<owner>/<repo> -f default_branch=<目标完整版本号>
+gh api -X PATCH repos/ventisyn/dsh-agent-control -f default_branch=<目标完整版本号>
 
 # 下一轮再从头评估新的目标版本，开 <新目标版本>/dev
 ```
@@ -602,7 +602,7 @@ gh api -X PATCH repos/<owner>/<repo> -f default_branch=<目标完整版本号>
 
 ```sh
 # 方式一：从 dev 分支装（pnpm 按分支名解析 ref）
-dsh plugin --profile <profile 名> add github:<owner>/dsh-agent-control#<目标完整版本号>/dev
+dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#<目标完整版本号>/dev
 
 # 方式二（推荐，迭代最快）：链接本地工作副本，改完重启/热加载即生效
 dsh plugin --profile <profile 名> add link:<本地 clone 路径>

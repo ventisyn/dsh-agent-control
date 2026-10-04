@@ -40,7 +40,7 @@ DeepSeek Harness（DSH）插件：把两件**破坏性、不可撤销**的操作
 
 ```sh
 # 从已发布的版本分支安装
-dsh plugin --profile <profile 名> add github:<owner>/dsh-agent-control#<完整版本号>
+dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#0.2.0-rc.2-v1.0.0
 
 # 本地开发（改完重启即生效）
 dsh plugin --profile <profile 名> add link:<本地 clone 路径>
