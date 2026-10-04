@@ -288,7 +288,7 @@ export function pushRateHistory(history, entry, now = Date.now()) {
  * 启动器会把它消化成 `--profile` 的值，进程里真实的 `process.argv.slice(1)` 形如（M0 原型实测，
  * 见 docs/SPIKE-hot-restart.md 的 S2）：
  *
- *     ["C:\\...\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js", "--profile", "<profile 名>", "--no-open", "--port", "10727"]
+ *     ["C:\\...\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js", "--profile", "<profile 名>", "--no-open", "--port", "3080"]
  *
  * 也就是 `argv[0]` 是 bin.js 的路径，**根本没有 `'web'` 这个 token**；而 `--profile` 后面跟的
  * profile 名又可能恰好叫 `web`。所以「是不是 web 应用」不是纯逻辑层能可靠判定的事实，由 host 接线传入

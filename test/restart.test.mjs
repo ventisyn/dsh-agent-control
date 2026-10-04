@@ -58,12 +58,12 @@ function launchInput(overrides = {}) {
   return {
     execPath: 'C:\\runtime\\node.exe',
     execArgv: ['--enable-source-maps'],
-    argv: ['C:\\dsh\\bin.js', '--profile', 'example', 'web', '--port', '10727'],
+    argv: ['C:\\dsh\\bin.js', '--profile', 'example', '--no-open', '--port', '3080'],
     cwd: 'D:\\work\\example',
-    env: { PATH: 'C:\\runtime', PORT: '10727' },
+    env: { PATH: 'C:\\runtime', PORT: '3080' },
     oldPid: 4321,
     oldBootId: 'b-old',
-    statusUrl: 'http://127.0.0.1:10727/api/agent-control/restart/status',
+    statusUrl: 'http://127.0.0.1:3080/api/agent-control/restart/status',
     logFile: 'C:\\home\\.dsh\\logs\\agent-control-restart-20260101-000000.log',
     restartId: 'r-old',
     now: 1_700_000_000_000,
@@ -351,7 +351,9 @@ test('pushRateHistory：缺 at 的新条目补成当下，缺 history 按空账�
 // ---------------------------------------------------------------------------
 
 test('appendNoOpen：isWebApp 为 true 时追加到末尾', () => {
-  const argv = ['C:\\dsh\\bin.js', '--profile', 'example', 'web', '--port', '10727']
+  // 按实测形状写：`web` 只是 `--profile web` 的简写，不是 argv 里的 token。
+  // 这里故意不放 `--no-open`——本用例验的就是「没有它时补上」。
+  const argv = ['C:\\dsh\\bin.js', '--profile', 'example', '--port', '3080']
   const next = appendNoOpen(argv, { isWebApp: true })
 
   assert.deepEqual(next, [...argv, '--no-open'])
@@ -417,7 +419,7 @@ test('buildLaunchSpec：完整入参通过，键名符合冻结契约', () => {
   assert.equal(spec.oldPid, 4321)
   assert.equal(spec.oldBootId, 'b-old')
   assert.equal(spec.createdAt, 1_700_000_000_000)
-  assert.equal(spec.env.PORT, '10727')
+  assert.equal(spec.env.PORT, '3080')
 })
 
 test('buildLaunchSpec：返回值可以 JSON 往返（含 env 全是字符串）', () => {

@@ -1493,7 +1493,7 @@ test('重启设置页：画出运行状态、阻塞项、危险态主按钮与�
     bootId: 'boot1234567890',
     pid: 4242,
     startedAt: new Date(Date.now() - 125000).toISOString(),
-    port: 10727,
+    port: 3080,
     canRestart: true,
     blockers: { sessions: [{ sessionId: 'session-1', title: '正在跑长任务的会话', descendant: true }], jobs: 2 },
     pending: null,
@@ -1529,7 +1529,7 @@ test('重启设置页：画出运行状态、阻塞项、危险态主按钮与�
   const text = collectText(tree).join('\n')
   assert.ok(text.includes('0.2.1-alpha.1-v1.1.0'), '要显示版本')
   assert.ok(text.includes('4242'), '要显示进程号')
-  assert.ok(text.includes('10727'), '要显示端口')
+  assert.ok(text.includes('3080'), '要显示端口')
   assert.ok(text.includes('2 分 5 秒'), '要显示已运行时长')
   assert.ok(text.includes('boot1234…'), '★ bootId 只显示简写')
   assert.ok(text.includes('正在跑长任务的会话'), '★ 阻塞项要列出会话标题')
