@@ -605,7 +605,8 @@ test('新进程的续作投递：拉起会话、投一次、结果合并写进 l
     },
   })
   const deps = makeRestartDeps(ctx, { dshHome: home })
-  writeLast(dir, { restartId: 'r-old', ok: true, durationMs: 6400, finishedAt: 1 })
+  // 辅助进程这次写的记录（同一个 restartId）：新进程的合并写必须把它保住。
+  writeLast(dir, { restartId: 'r-1', ok: true, durationMs: 6400, finishedAt: 1 })
   writePending(dir, {
     restartId: 'r-1',
     sessionId: 'session-me',
@@ -668,6 +669,50 @@ test('新进程的续作投递：辅助进程还没写 last.json 时，耗时退
   assert.equal(prompts.length, 1)
   assert.doesNotMatch(prompts[0].content[0].text, /耗时：未知/, '★ 有 createdAt 就不该显示「未知」')
   assert.match(prompts[0].content[0].text, /耗时：\d+ 秒/)
+})
+
+test('新进程的续作投递：上一次重启的字段不会被带进这一次', async (t) => {
+  const home = tempHome(t)
+  const dir = restartDir(home)
+  const { ctx } = makeToolContext({
+    sessionController: {
+      resolveAgent: async (sessionId) => ({ agent: { id: sessionId } }),
+      prompt: async () => ({ accepted: true }),
+    },
+  })
+  const deps = makeRestartDeps(ctx, { dshHome: home })
+  // 上一次（模型发起）留下的完整记录：sessionId / resumeAt / logFile 都属于它。
+  writeLast(dir, {
+    restartId: 'r-previous',
+    ok: true,
+    newPid: 4242,
+    durationMs: 6100,
+    logFile: '/logs/previous.log',
+    source: 'model',
+    reason: '上一次的原因',
+    resume: 'delivered',
+    resumeAt: 111,
+    sessionId: 'session-previous',
+  })
+  // 这一次是界面发起的：没有要续作的会话。
+  writePending(dir, {
+    restartId: 'r-current',
+    sessionId: '',
+    source: 'ui',
+    reason: '用户在设置页点了「重启 DSH」',
+    state: 'helper-started',
+    createdAt: Date.now(),
+  })
+
+  const result = await deliverResumes(ctx, deps)
+
+  assert.equal(result.resume, 'none')
+  const last = readLast(dir)
+  assert.equal(last.restartId, 'r-current')
+  assert.equal(last.reason, '用户在设置页点了「重启 DSH」')
+  assert.equal(last.sessionId, undefined, '★ 上一次的会话 id 不许跟过来')
+  assert.equal(last.resumeAt, undefined, '★ 上一次的投递时间不许跟过来')
+  assert.equal(last.logFile, undefined, '★ 上一次的日志文件不许跟过来')
 })
 
 test('续作投递失败与过期待办：如实记 failed / 直接丢弃，都不重复投递', async (t) => {

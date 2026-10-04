@@ -784,11 +784,27 @@ async function cancelRestart(ctx, deps, state, reason) {
   else ctx.logger?.error?.(`${line}（写 last.json 也失败了：${written.message}）`)
 }
 
-/** 合并写 `last.json`：保留别的字段（例如上一次的 logFile 之外的元信息），不整份覆盖。 */
+/**
+ * 合并写 `last.json`。
+ *
+ * ⚠️ **只在同一次重启（`restartId` 相同）时合并**：这份文件跨重启复用，无条件合并会把上一次的
+ * `sessionId` / `resumeAt` / `newPid` / `logFile` 带进这一次，设置页就会显示不属于这次重启的信息。
+ * 真机踩到过：一次界面重启的卡片上写着上一次模型重启的耗时与日志文件。
+ * 正常流程里新进程写「身份」、辅助进程写「结果」，两者带同一个 `restartId`，所以仍然合并得上。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} deps - deps。
+ * @param {Record<string, unknown>} patch - 要写进去的字段（**必须带 `restartId`**）。
+ * @returns {{ ok: true } | { ok: false, message: string }} 写入结果。
+ */
 function writeLastMerged(ctx, deps, patch) {
   const previous = readLast(deps.dir) ?? {}
+  const sameRestart = typeof patch?.restartId === 'string'
+    && patch.restartId !== ''
+    && previous.restartId === patch.restartId
+  const next = sameRestart ? { ...previous, ...patch } : { ...patch }
   try {
-    writeLast(deps.dir, { ...previous, ...patch })
+    writeLast(deps.dir, next)
     return { ok: true }
   } catch (error) {
     return { ok: false, message: describeError(error) }
