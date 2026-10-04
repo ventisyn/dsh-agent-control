@@ -569,11 +569,6 @@ gh api -X PATCH repos/ventisyn/dsh-agent-control -f default_branch=<目标完整
 - **先删远端 `/dev`，再推版本分支**（`directory file conflict`）。
 - `/dev` 分支**同时只有一条**；它改名成版本分支后，下一轮开新的。
 - 版本分支**只由 dev 改名产生**：不要直接在版本分支上提交，也不要为同一个版本另开分支。
-  - **例外：纯文档改动**——`README.md`、`AGENTS.md`、`GLOSSARY.md`、`docs/**` 与 ADR，用 `docs:` 类型提交即可直接落在版本分支上并推送。
-    版本分支因此比 tag 多出几个文档提交是**接受的**：tag 与已发布的 Release 都不动（Release 正文里的安装 ref 只在下一次发布时更新）。
-    这条例外是有用的：`docs/VERIFY-<版本>.md` 属于它记录的那个版本，而 README 让读者「按 `docs/VERIFY-*.md` 判断成熟度」——只有落在默认分支上才看得到。
-  - 例外**只覆盖文档**：代码（`src/**`、`client.js`）、测试（`test/**`）与 `package.json`（含 `version`）都不算；
-    这三类要改，就回到第一步重新评估版本号，开一条新的 `<目标版本>/dev`。
 - 版本号在 dev 的**第一个提交**里就提到目标版本；中途若改动性质变化，先 `git branch -m` 改成新目标版本名，再改 `package.json`。
 
 ### 版本分支保留策略
