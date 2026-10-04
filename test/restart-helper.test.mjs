@@ -291,7 +291,35 @@ test('成功路径（statusUrl 为 null 的降级路径）：旧进程已退出 
   assert.equal(defaultProbe(newPid), true, '★ 辅助进程退出后新进程必须还活着')
   assert.equal(readFileSync(cwdFile, 'utf8'), spec.cwd, '新进程的工作目录来自 spec.cwd')
   assert.equal(existsSync(spec.logFile), true, '新进程的 stdout/stderr 指向这个日志文件')
+  assert.equal(existsSync(path.join(dir, 'spec.json')), false, '★ 启动规格（含环境变量）用完即删')
   assertNoTempLeftovers(dir)
+})
+
+test('失败路径：spec.json 与 pending.json 都清掉——否则下次启动会谎报「已热重启」', { timeout: 10000 }, async (t) => {
+  // 真机踩到过：新进程起不来时两份文件都留在盘上，而 pending.json 会让用户**下次手动启动**时
+  // 收到一条声称「DSH 已热重启」的续作消息——通知一件没发生的事比不通知更坏。
+  const env = scratch(t)
+  const { dir } = env
+  const spec = makeSpec(dir, {
+    restartId: 'r-cleanup-on-failure',
+    execPath: path.join(dir, 'no-such-dsh.exe'),
+    oldPid: await deadPid(env),
+  })
+  const specPath = writeSpec(dir, spec)
+  writeFileSync(
+    path.join(dir, 'pending.json'),
+    `${JSON.stringify({ restartId: 'r-cleanup-on-failure', state: 'helper-started' })}\n`,
+    'utf8',
+  )
+
+  const run = await runHelperProcess(specPath)
+  const last = readLast(dir)
+
+  assert.equal(run.code, 1)
+  assert.equal(last.ok, false)
+  assert.equal(existsSync(specPath), false, '★ 启动规格含环境变量：失败也必须删掉')
+  assert.equal(existsSync(path.join(dir, 'pending.json')), false, '★ 待办必须清掉：这次重启并没有成功')
+  assert.equal(existsSync(path.join(dir, 'last.json')), true, '失败原因留在 last.json 里（那才是给界面看的）')
 })
 
 test('成功路径（statusUrl 可用）：bootId 变了即就绪，ok:true 且不写 degraded', { timeout: 10000 }, async (t) => {

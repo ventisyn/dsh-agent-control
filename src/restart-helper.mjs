@@ -638,6 +638,9 @@ export async function runHelper(specPath, options = {}) {
     if (degraded) payload.degraded = true
     writeLastAtomic(dir, payload)
     log(`已写 last.json：ok=true 耗时 ${payload.durationMs} 毫秒`)
+    // 成功：启动规格**用完即删**（里面有完整的环境变量快照）。pending.json 留着——
+    // 新进程正要靠它投递续作消息。
+    discardSpec(specPath, log)
     return { ok: true, exitCode: 0, payload }
   } catch (error) {
     const helperError = toHelperError(error)
@@ -661,7 +664,34 @@ export async function runHelper(specPath, options = {}) {
       // 连 last.json 都写不下去（例如目录不存在）：只能靠退出码表达。
       payload.writeError = describe(writeError)
     }
+    // 失败：**两份都清掉**。真机踩到过——新进程起不来时 `spec.json`（含环境变量）与
+    // `pending.json` 会一直留在盘上，而后者更坏：用户下次手动启动时，新进程会读到一个
+    // 「上次那次其实失败了的热重启」待办，投出一条**声称已经重启过**的续作消息。宁可不通知，
+    // 也不能通知一件没发生的事。失败原因已经完整写进 last.json，不需要靠这两个文件留证。
+    discardSpec(specPath, log)
+    discardPending(dir, log)
     return { ok: false, exitCode: 1, payload, error: helperError }
+  }
+}
+
+/**
+ * 删掉启动规格（含环境变量快照，计划 3.5 要求「用完即删」）。删不掉只记一行，不影响结果——
+ * 新进程侧还有一次过期清理兜底（`cleanupSpec`）。
+ */
+function discardSpec(specPath, log) {
+  try {
+    unlinkSync(specPath)
+  } catch (error) {
+    if (error?.code !== 'ENOENT') log(`删 spec.json 失败（不影响结果）：${describe(error)}`)
+  }
+}
+
+/** 失败路径专用：清掉待办，避免下次启动投出一条「谎报成功」的续作消息。 */
+function discardPending(dir, log) {
+  try {
+    unlinkSync(path.join(dir, 'pending.json'))
+  } catch (error) {
+    if (error?.code !== 'ENOENT') log(`删 pending.json 失败：${describe(error)}`)
   }
 }
 
