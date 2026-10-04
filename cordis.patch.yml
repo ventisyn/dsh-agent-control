@@ -1,3 +1,8 @@
 - insert:
     - id: agent-control
       name: dsh-agent-control
+      # 模型发起的重启是否要过一次审批：`ask`（缺省，走 DSH 审批卡片）| `auto`（免审批）。
+      # host 端不 import schemastery，所以这个值由插件自己手工校验，未知值一律回退 `ask`
+      # （见 docs/PLAN-hot-restart.md 3.4）。界面上的重启按钮不走审批：点按钮本身就是授权。
+      config:
+        approval: ask

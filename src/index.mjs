@@ -22,8 +22,19 @@ import {
   sessionDirNames,
   toControlError,
 } from './shared.mjs'
+import { assertRestartReason } from './restart.mjs'
 import { DEFAULT_STOP_TIMEOUT_MS, deleteSession, listSessions } from './session-delete.mjs'
 import { deleteTurn, deletedTurns } from './turn-delete.mjs'
+import {
+  DEFAULT_UI_REASON,
+  buildRestartStatus,
+  checkRestartTrust,
+  createRestartState,
+  isJsonRequest,
+  registerRestartTool,
+  requestRestart,
+  startResumeDelivery,
+} from './restart-tool.mjs'
 
 /** 插件名（cordis 行 id / loader id 都用它）。 */
 export const name = PLUGIN_NAME
@@ -46,7 +57,7 @@ export const inject = hostInject
 const MAX_BODY_BYTES = 64 * 1024
 
 /**
- * 插件入口：注册路由。
+ * 插件入口：注册路由与热重启工具。
  *
  * **不在模块级别缓存「哪些会话活着」**，每次请求都现查 `ctx.sessions.list()` / `get()`。
  * 早期版本用一个模块级集合加 `session/created` / `session/disposed` 订阅来记账，并且
@@ -60,9 +71,23 @@ const MAX_BODY_BYTES = 64 * 1024
  * 插件**拿不到**它，`detachEntered` 又是 private，所以本插件**拒绝删除活会话**
  * （见 session-delete.mjs）。
  *
+ * 热重启那部分的护栏、状态与日志都在 `./restart-tool.mjs` 里：这里只做接线——两条路由、
+ * 工具注册、启动后的「续作投递」。两条入口（模型工具、界面按钮）共用同一个 `requestRestart`。
+ *
  * @param {any} ctx - cordis 上下文。
+ * @param {{ approval?: unknown }} [config] - 插件行的 `config:`（cordis 把 `cordis.patch.yml` 里那一行
+ *   的 `config:` 作为第二个参数传进来）。只认 `approval: 'ask' | 'auto'`，未知值一律回退 `ask`
+ *   （host 不 import schemastery，手工校验，见 restart-tool.mjs 的 `resolveApprovalMode`）。
+ * @param {{ now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, dshHome?: string }} [host] -
+ *   **副作用实现**，供离线测试注入。cordis 只传前两个参数，所以生产路径上这里是 `undefined`，
+ *   重启用的是真实实现（`setTimeout` / `child_process.spawn` / `ctx.appExit`）。测试必须注入，
+ *   否则会真的派生辅助进程并退出测试进程。
+ * @returns {void}
  */
-export function apply(ctx) {
+export function apply(ctx, config, host) {
+  // 重启现场的「快照 + 副作用」在这里读一次；两条路由与工具共用同一份（单飞锁、限频账本因此只有一份）。
+  const restart = createRestartState(ctx, { ...host, config })
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: PATHS.sessions,
@@ -83,6 +108,81 @@ export function apply(ctx) {
     path: PATHS.turnDelete,
     handler: wrap(ctx, 'POST', handleDeleteTurn),
   }), `${PLUGIN_NAME}: POST ${PATHS.turnDelete}`)
+
+  // 热重启：状态（新进程的就绪探针也是它）+ 发起。
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PATHS.restartStatus,
+    handler: wrap(ctx, 'GET', (innerCtx) => handleRestartStatus(innerCtx, restart)),
+  }), `${PLUGIN_NAME}: GET ${PATHS.restartStatus}`)
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PATHS.restart,
+    handler: wrap(ctx, 'POST', (innerCtx, payload, _url, req) => handleRestartRequest(innerCtx, restart, payload, req), '重启请求失败'),
+  }), `${PLUGIN_NAME}: POST ${PATHS.restart}`)
+
+  // 模型入口。注册失败只在 restart-tool 内部记日志：界面入口必须照常可用。
+  registerRestartTool(ctx, restart)
+  // 新进程这一侧：应用就绪后消费上一次重启留下的待办，投递续作消息；顺带清掉含 env 的启动规格。
+  startResumeDelivery(ctx, restart)
+}
+
+/**
+ * `GET /api/agent-control/restart/status`：重启现场与最近一次结果。
+ *
+ * **不做可信校验**：辅助进程要用它当就绪探针（普通 `fetch`，既没有 Origin 也没有自定义头），
+ * 加校验会让重启永远「确认不了就绪」。它只读，不改任何状态；`POST /restart` 才是那道必须守的门。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} restart - `createRestartState` 的结果。
+ * @returns {Promise<{ status: number, body: any }>} 响应。
+ */
+async function handleRestartStatus(ctx, restart) {
+  return { status: 200, body: buildRestartStatus(ctx, restart) }
+}
+
+/**
+ * `POST /api/agent-control/restart`：用户从设置页发起重启。
+ *
+ * 三重输入校验，缺一不可：
+ *   1. 可信：先问宿主的 `connection.requestRejection`，再用本插件自己的同源/自定义头规则兜底
+ *      （自建路由不走 harness 鉴权链路，AGENTS.md 3.5）；
+ *   2. `content-type` 必须是 JSON（跨站表单能发简单请求，但发不出这个头）；
+ *   3. `reason` 走 `assertRestartReason`（界面可以不写，缺省用一句默认中文），`force` 只认 `true`。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} restart - `createRestartState` 的结果。
+ * @param {any} payload - 请求体。
+ * @param {any} req - node IncomingMessage（要读 headers）。
+ * @returns {Promise<{ status: number, body: any }>} 响应（202 = 已安排，不是「已经重启完成」）。
+ * @throws {ControlError} 拒绝时抛出，由 wrap 映射成 HTTP。
+ */
+async function handleRestartRequest(ctx, restart, payload, req) {
+  const rejection = safeCall(() => ctx.get?.('connection')?.requestRejection?.({ headers: req?.headers }))
+  const denied = checkRestartTrust(req?.headers, rejection)
+  if (denied !== undefined) {
+    throw new ControlError(
+      ERROR_CODES.restartDenied,
+      denied === 401
+        ? '这次请求没有通过宿主的鉴权（401）；请从已登录的界面发起，或重新登录后再试'
+        : '这次请求没有通过可信校验（403）：需要一个同源的浏览器请求，或带上 x-dsh-agent-control: 1 头',
+      { status: denied },
+    )
+  }
+  if (!isJsonRequest(req?.headers)) {
+    throw new ControlError(ERROR_CODES.invalidRequest, '只接受 content-type: application/json 的请求')
+  }
+  const rawReason = payload?.reason
+  const reason = rawReason === undefined || rawReason === null || (typeof rawReason === 'string' && rawReason.trim() === '')
+    ? DEFAULT_UI_REASON
+    : assertRestartReason(rawReason)
+  const result = await requestRestart(ctx, restart, {
+    source: 'ui',
+    reason,
+    // 只有明确的 true 才算「仍然重启」：字符串 "true"、1 之类一律当没勾选，不替用户下这个决定。
+    force: payload?.force === true,
+  })
+  return { status: 202, body: { ok: true, restartId: result.restartId } }
 }
 
 /**
@@ -219,10 +319,11 @@ async function handleDeleteTurn(ctx, payload) {
  *
  * @param {any} ctx - cordis 上下文。
  * @param {'GET' | 'POST'} method - 该路由接受的方法（显式传入，不靠函数身份猜）。
- * @param {(ctx: any, payload: any, url: URL) => Promise<{ status: number, body: any }>} handler - 业务处理。
+ * @param {(ctx: any, payload: any, url: URL, req: any) => Promise<{ status: number, body: any }>} handler - 业务处理（第四个参数是原始请求，需要读 headers 的路由用）。
+ * @param {string} [fallbackMessage] - 异常本身没有 message 时的兜底说明（缺省沿用删除类的文案）。
  * @returns {(req: any, res: any) => Promise<void>} 路由处理器。
  */
-function wrap(ctx, method, handler) {
+function wrap(ctx, method, handler, fallbackMessage = '删除失败') {
   return async (req, res) => {
     try {
       if (req.method !== method) {
@@ -244,10 +345,10 @@ function wrap(ctx, method, handler) {
           }
         }
       }
-      const result = await handler(ctx, payload, url)
+      const result = await handler(ctx, payload, url, req)
       sendJson(res, result.status, result.body)
     } catch (error) {
-      const control = toControlError(error, '删除失败')
+      const control = toControlError(error, fallbackMessage)
       if (control.code === ERROR_CODES.deleteFailed) {
         // 内部故障：原样记日志，绝不改写成「任务正在运行」。
         ctx.logger?.error?.(`${PLUGIN_NAME}: ${control.message}`)

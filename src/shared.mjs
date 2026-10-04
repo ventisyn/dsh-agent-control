@@ -20,6 +20,9 @@ export const PATHS = {
   // 辅助进程靠它判断新进程是否已经起来了。
   restartStatus: `${API_PREFIX}/restart/status`,
   restart: `${API_PREFIX}/restart`,
+  // 模型可见的工具名。client 侧也有一份同名常量（浏览器 bundle 与 host 模块不共享模块图），
+  // 两边的值必须一致。
+  restartToolName: 'restart_harness',
 }
 
 /**
@@ -42,6 +45,9 @@ export const ERROR_CODES = {
   restartRateLimited: 'RESTART_RATE_LIMITED',
   restartUnsupported: 'RESTART_UNSUPPORTED',
   restartDenied: 'RESTART_DENIED',
+  // 子代理调用重启工具。与 RESTART_DENIED 分开：前者是「你不该发起这件事」（换谁来都没用），
+  // 后者是「这次没被批准」（换一次审批可能就过了）。计划 3.1 要求子代理拒绝，3.2 的表漏了这一行。
+  restartForbidden: 'RESTART_FORBIDDEN',
 }
 
 /** 带错误码的失败。路由层按码决定 HTTP 状态。 */
@@ -77,10 +83,11 @@ export function statusForCode(code) {
     case ERROR_CODES.turnCompacted:
     case ERROR_CODES.sessionLive: return 409
     case ERROR_CODES.agentBusy: return 423
-    // 重启：403 是「不允许你重启」（审批被拒 / Origin 校验失败），
+    // 重启：403 是「不允许你重启」（审批被拒 / 子代理发起 / Origin 校验失败），
     // 409 是「现在不行」（有阻塞项 / 已经有一个在跑），429 是「太频繁」，
     // 501 是「这个部署根本做不到」——四者的处置方式完全不同，绝不能合并。
-    case ERROR_CODES.restartDenied: return 403
+    case ERROR_CODES.restartDenied:
+    case ERROR_CODES.restartForbidden: return 403
     case ERROR_CODES.restartBlocked:
     case ERROR_CODES.restartInProgress: return 409
     case ERROR_CODES.restartRateLimited: return 429

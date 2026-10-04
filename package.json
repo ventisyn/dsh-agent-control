@@ -21,7 +21,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --check src/index.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --test \"test/**/*.test.mjs\"",
+    "test": "node --check src/index.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
     "log:inspect": "node test/log-inspect.mjs"
   },
   "keywords": [
@@ -30,7 +30,8 @@
     "dsh-plugin",
     "session",
     "turn-delete",
-    "session-delete"
+    "session-delete",
+    "restart"
   ],
   "dsh": {
     "bundle": {
