@@ -40,7 +40,7 @@ DeepSeek Harness（DSH）插件：把两件**破坏性、不可撤销**的操作
 
 ```sh
 # 从已发布的版本分支安装
-dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#0.2.0-rc.2-v1.0.0
+dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#0.2.1-alpha.1-v1.0.1
 
 # 本地开发（改完重启即生效）
 dsh plugin --profile <profile 名> add link:<本地 clone 路径>
@@ -93,7 +93,7 @@ POST /api/agent-control/turn/delete       { sessionId, assistantMessageId }
 ## 开发
 
 ```sh
-npm test    # 语法检查 + 83 项离线测试，不需要 DSH 进程，也不碰真实 profile
+npm test    # 语法检查 + 84 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
 设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)。
