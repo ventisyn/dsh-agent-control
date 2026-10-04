@@ -4,11 +4,11 @@
 
 **动手前先读第 4 节「与 DSH 版本的耦合点」、第 7 节「Git 提交规范」、第 10 节「分支开发流程」与第 11 节「版本号规范」；改完按第 9 节自检清单实测。** 本仓库若已有 `GLOSSARY.md` 与 `docs/adr/`，也要先读——它们是本项目自己的术语表与非显性决策（第 2 节）。
 
-> ✅ **轮次删除已恢复（当前 dev 分支）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
+> ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
 > ⚠️ **现状：离线测试 84 项通过（v1.0.0 真机复验时是 51 项）。** 实测结论：
 >
-> - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在 当前 dev 分支 实测中残留**（见 3.3）
+> - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`SESSION_LIVE`（409）、`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）
 > - **界面行为**：只隐藏目标轮次（坑 ⑩）、删除后**实时**更新不需刷新（6.2）、同步时不再让已藏的行闪现一帧（6.3）、删除时该轮**收起折叠**（6.4）——四条都已由用户真机确认
 >
@@ -50,7 +50,7 @@
 | `test/v4-load-check.mjs` | 用 DSH 安装目录里**真实的** v4 加载校验器检查会话日志，并在内存里逐轮模拟删除（坑 ⑪ 的防线）。依赖本机 DSH 安装，**不进** `npm test` |
 | `package.json` | `main` / `exports`（`.` 与 `./client`）、`dsh.bundle.patch`、`dsh.client.platform = web` |
 | `cordis.patch.yml` | bundle patch：`insert` 插件行（id `agent-control`） |
-| `docs/` | `VERIFY-0.2.0-rc.2-v1.0.0.md`（已落地，含未验证项清单）；`GUIDE.md`、`screenshots/` 未落地 |
+| `docs/` | `VERIFY-0.2.0-rc.2-v1.0.0.md` 与 `VERIFY-0.2.1-alpha.1-v1.0.1.md`（均已落地，含未验证项清单）；`GUIDE.md`、`screenshots/` 未落地 |
 
 拆成 `src/*.mjs` 而不是姊妹项目那样的单文件，是因为**核心逻辑必须能离线单测**：轮次删除是一段容易算错的区间代数，只有把纯逻辑与 cordis 接线分开，才能在 `npm test` 里覆盖（第 5、9 节）。
 
@@ -186,7 +186,7 @@
 | 读领域数据 | `ctx.storageDomain.get(name)` → `.table(n)` / `.global` | 以为 `ctx.storageDomain` 自己有 `.table` / `.global`（那两个在 Domain 句柄上） |
 | 删附件 | —（**没有公开 API**） | `attachments` 是模块级 `WeakMap`，不是会话成员；拿不到就别假装能删 |
 
-**已核对的磁盘/域名字面量（实测）**：`$DSH_HOME/storages/` 下是 `workspace.json`（工作区记账）与 `session_projcache/sessions/<会话 id>.json`（投影缓存，实测文件名带 `session-` 前缀）。本插件按 `ctx.workspaceRegistry` 的公开接口清记账，并按 `ctx.storageDomain.get('session_projcache')` → `.table('sessions')` → `.delete(id)` 清投影缓存（`KvTable.delete` 同时更新域的内存表与磁盘文档）。早期版本**没有**清缓存：v1.0.0 的「缓存里不残留」是偶然，当前 dev 分支 实测删除后**残留了** `session_projcache/sessions/session-<id>.json`，全盘扫描还找到 8 个早已删掉的会话留下的缓存记录。注意磁盘上的文件名是**带前缀**的 `session-<uuid>.json`（不是早先写的裸 UUID）——所以两种拼写都要删。拿不到域时如实回报「缓存没清」，不要退回去直接删文件。
+**已核对的磁盘/域名字面量（实测）**：`$DSH_HOME/storages/` 下是 `workspace.json`（工作区记账）与 `session_projcache/sessions/<会话 id>.json`（投影缓存，实测文件名带 `session-` 前缀）。本插件按 `ctx.workspaceRegistry` 的公开接口清记账，并按 `ctx.storageDomain.get('session_projcache')` → `.table('sessions')` → `.delete(id)` 清投影缓存（`KvTable.delete` 同时更新域的内存表与磁盘文档）。早期版本**没有**清缓存：v1.0.0 的「缓存里不残留」是偶然，本轮开发分支实测删除后**残留了** `session_projcache/sessions/session-<id>.json`，全盘扫描还找到 8 个早已删掉的会话留下的缓存记录。注意磁盘上的文件名是**带前缀**的 `session-<uuid>.json`（不是早先写的裸 UUID）——所以两种拼写都要删。拿不到域时如实回报「缓存没清」，不要退回去直接删文件。
 
 **附件的现状**：删除轮次**不会**清理附件字节，而且当前内核也没有公开的附件清理 API。因此「被删轮次的图片/文件仍留在 `$DSH_HOME/attachments`」是**已知且无法在本插件内解决**的限制——必须写进 README 与 UI 文案，不要留白让人以为已经清干净。
 
