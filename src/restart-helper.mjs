@@ -485,11 +485,20 @@ export async function waitForDegradedReady({
  * 原子写 `last.json`：先写同目录临时文件，再 rename 覆盖目标（Windows 上 rename 会替换已有文件）。
  * 失败时清掉临时文件，不留残留。
  */
-export function writeLastAtomic(dir, payload, { write = writeFileSync, rename = renameSync, remove = unlinkSync } = {}) {
+export function writeLastAtomic(dir, payload, { write = writeFileSync, rename = renameSync, remove = unlinkSync, read = readFileSync } = {}) {
   const target = path.join(dir, 'last.json')
   const temp = path.join(dir, `last.json.tmp-${process.pid}-${Date.now().toString(36)}`)
+  // ⚠️ **必须合并，不能整份覆盖**：新进程在 `appReady` 时就把「续作投递结果」写进了 last.json，
+  // 而那一刻辅助进程通常还没探测到它就绪（轮询间隔 1 秒）——整份覆盖会把 source / reason /
+  // resume 全部冲掉，设置页的「最近一次重启」就只剩时间和 pid。真机实测踩到过。
+  //
+  // 只合并**同一个 restartId** 的旧记录：last.json 跨重启复用，无条件合并会把上一次的
+  // `resume: 'delivered'` 带到这一次的结果里，那是编造。
+  const existing = readLastRecord(target, read)
+  const sameRestart = typeof payload?.restartId === 'string' && payload.restartId !== '' && existing.restartId === payload.restartId
+  const merged = sameRestart ? { ...existing, ...payload } : { ...payload }
   try {
-    write(temp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    write(temp, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
     rename(temp, target)
   } catch (error) {
     try {
@@ -500,6 +509,16 @@ export function writeLastAtomic(dir, payload, { write = writeFileSync, rename = 
     throw error
   }
   return target
+}
+
+/** 读已有的 last.json；读不到、坏掉、不是对象都当「没有」——合并的基准缺失不该让重启失败。 */
+function readLastRecord(file, read) {
+  try {
+    const parsed = JSON.parse(read(file, 'utf8'))
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
 }
 
 // ---------------------------------------------------------------------------

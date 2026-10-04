@@ -632,6 +632,42 @@ test('新进程的续作投递：拉起会话、投一次、结果合并写进 l
   const last = readLast(dir)
   assert.equal(last.resume, 'delivered')
   assert.equal(last.durationMs, 6400, '合并写：不能把辅助进程写的字段冲掉')
+  // 「谁发起的、为什么」只有新进程知道：它必须自己写进 last.json，否则辅助进程随后合并写成功记录后
+  // 设置页就只剩时间和 pid（真机踩到过）。
+  assert.equal(last.restartId, 'r-1')
+  assert.equal(last.source, 'model')
+  assert.equal(last.reason, '装完宿主插件')
+  assert.equal(last.sessionId, 'session-me')
+  assert.equal(typeof last.resumeAt, 'number')
+})
+
+test('新进程的续作投递：辅助进程还没写 last.json 时，耗时退回「待办创建 → 现在」', async (t) => {
+  const home = tempHome(t)
+  const dir = restartDir(home)
+  const prompts = []
+  const { ctx } = makeToolContext({
+    sessionController: {
+      resolveAgent: async (sessionId) => ({ agent: { id: sessionId } }),
+      prompt: async (request) => { prompts.push(request); return { accepted: true } },
+    },
+  })
+  const deps = makeRestartDeps(ctx, { dshHome: home })
+  // 真机上这个竞态是常态：新进程就绪与辅助进程探测到就绪之间隔着最多 1 秒的轮询。
+  writePending(dir, {
+    restartId: 'r-race',
+    sessionId: 'session-me',
+    source: 'model',
+    reason: '装插件',
+    state: 'helper-started',
+    createdAt: Date.now() - 7000,
+  })
+
+  const result = await deliverResumes(ctx, deps)
+
+  assert.equal(result.resume, 'delivered')
+  assert.equal(prompts.length, 1)
+  assert.doesNotMatch(prompts[0].content[0].text, /耗时：未知/, '★ 有 createdAt 就不该显示「未知」')
+  assert.match(prompts[0].content[0].text, /耗时：\d+ 秒/)
 })
 
 test('续作投递失败与过期待办：如实记 failed / 直接丢弃，都不重复投递', async (t) => {

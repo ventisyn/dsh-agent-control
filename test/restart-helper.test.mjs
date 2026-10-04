@@ -692,3 +692,43 @@ test('last.json 是覆盖写的原子写：连写两次只有一份结果，不�
   assert.equal(last.restartId, 'r-2', '后写的覆盖先写的')
   assert.equal(last.ok, false)
 })
+
+test('last.json：同一个 restartId 的记录会合并，不把新进程写的续作结果冲掉', async (t) => {
+  const env = scratch(t)
+  const { dir } = env
+  // 新进程在 appReady 时先写：它只知道「谁发起的、为什么、续作投递成不成」。
+  writeLastAtomic(dir, { restartId: 'r-9', source: 'model', reason: '装了宿主插件', resume: 'delivered' })
+  // 辅助进程随后写：它只知道「怎么重放的、新进程是谁、多久」。
+  writeLastAtomic(dir, { restartId: 'r-9', ok: true, newPid: 4242, durationMs: 6100, logFile: '/tmp/x.log' })
+
+  const last = JSON.parse(readFileSync(path.join(dir, 'last.json'), 'utf8'))
+  assert.equal(last.resume, 'delivered', '★ 真机踩过：整份覆盖会让设置页只剩时间和 pid')
+  assert.equal(last.source, 'model')
+  assert.equal(last.reason, '装了宿主插件')
+  assert.equal(last.durationMs, 6100, '辅助进程自己的字段照常写进去')
+  assert.equal(last.newPid, 4242)
+})
+
+test('last.json：restartId 不同的旧记录不会被合并进来（避免把上一次的续作结果带过来）', async (t) => {
+  const env = scratch(t)
+  const { dir } = env
+  writeLastAtomic(dir, { restartId: 'r-old', resume: 'delivered', source: 'model', reason: '上一次' })
+  writeLastAtomic(dir, { restartId: 'r-new', ok: true, newPid: 7 })
+
+  const last = JSON.parse(readFileSync(path.join(dir, 'last.json'), 'utf8'))
+  assert.equal(last.restartId, 'r-new')
+  assert.equal(last.resume, undefined, '上一次的 resume 不许跟过来')
+  assert.equal(last.source, undefined)
+  assert.equal(last.reason, undefined)
+})
+
+test('last.json：已有文件坏掉时当作「没有」，照样把这次结果写下去', async (t) => {
+  const env = scratch(t)
+  const { dir } = env
+  writeFileSync(path.join(dir, 'last.json'), '{ 这不是 JSON', 'utf8')
+  writeLastAtomic(dir, { restartId: 'r-1', ok: true })
+
+  const last = JSON.parse(readFileSync(path.join(dir, 'last.json'), 'utf8'))
+  assert.equal(last.ok, true)
+  assert.equal(last.restartId, 'r-1')
+})

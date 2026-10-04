@@ -883,12 +883,20 @@ export async function deliverResumes(ctx, deps) {
 
   if (pending === undefined) return { resume: 'none' }
 
+  // 这份「这次重启是谁发起的、为什么」只有新进程知道（辅助进程只知道怎么重放启动）。
+  // 先写下来，辅助进程随后**合并**写自己的成功记录时不会把它冲掉（同 restartId 才合并）。
+  const identity = {
+    restartId: textOf(pending.restartId) || null,
+    source: textOf(pending.source) || null,
+    reason: textOf(pending.reason) || null,
+  }
+
   if (isStale(pending, now)) {
     ctx.logger?.warn?.(
       `${PLUGIN_NAME}: 丢弃过期的一次热重启待办（restartId=${textOf(pending.restartId) || '未知'}，创建于 ${String(pending.createdAt)}），不投递续作消息`,
     )
     safeCall(() => clearPending(deps.dir))
-    writeLastMerged(ctx, deps, { resume: 'none' })
+    writeLastMerged(ctx, deps, { ...identity, resume: 'none' })
     return { resume: 'none' }
   }
 
@@ -897,20 +905,24 @@ export async function deliverResumes(ctx, deps) {
   const sessionId = textOf(pending.sessionId)
   if (sessionId === '') {
     // 界面发起的重启：没有要续作的会话（计划 2.2）。
-    writeLastMerged(ctx, deps, { resume: 'none' })
+    writeLastMerged(ctx, deps, { ...identity, resume: 'none' })
     return { resume: 'none' }
   }
 
   const previous = readLast(deps.dir) ?? {}
+  const measured = Number.isFinite(previous.durationMs) ? previous.durationMs : undefined
+  const fromPending = Number.isFinite(pending.createdAt) ? Math.max(0, now - pending.createdAt) : undefined
   const message = buildResumeMessage({
     reason: pending.reason,
-    // 耗时由辅助进程实测写进 last.json：拿不到就写「未知」，不编造。
-    durationMs: previous.durationMs,
+    // 耗时优先用辅助进程实测写下的那个；**它多半还没写**（新进程就绪与辅助进程探测到就绪
+    // 之间有最多 1 秒的轮询间隔），这时退回「待办创建 → 现在」，宁可是个偏大的估计，
+    // 也不要每次都显示「未知」；两者都拿不到才写「未知」。
+    durationMs: measured ?? fromPending,
     resumeNote: pending.resumeNote,
   })
   const restartId = textOf(pending.restartId)
   const result = await deliverToSession(ctx, sessionId, message, `resume-${restartId || newRestartId(now)}`)
-  const patch = { resume: result.ok === true ? 'delivered' : 'failed', resumeAt: now, sessionId }
+  const patch = { ...identity, resume: result.ok === true ? 'delivered' : 'failed', resumeAt: now, sessionId }
   if (result.ok !== true) {
     patch.resumeError = result.message
     ctx.logger?.error?.(`${PLUGIN_NAME}: 重启后的续作消息没能投递到 ${sessionId}：${result.message}`)
