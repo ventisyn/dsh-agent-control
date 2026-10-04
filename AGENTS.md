@@ -6,7 +6,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 195 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 196 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`SESSION_LIVE`（409）、`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）
@@ -48,7 +48,7 @@
 | `src/shared.mjs` | host 与 client 共用的常量与纯工具（路由路径、错误码、id 校验、轮次括号） |
 | `client.js` | 浏览器端 bundle，经 `window.__ModuleLoader__.load({ id: 'dsh-agent-control', factory })` 注册 |
 | `test/*.test.mjs` | 离线测试（`npm test` 的主体），六个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线、热重启纯逻辑、热重启辅助进程（`host.test.mjs`：HTTP 状态映射与活会话闸门） |
-| `test/log-inspect.mjs` | **只读**会话日志诊断器（3.6）：解压 `session.v4.jsonl.zstd`、列墓碑、独立复刻 surface 代数、打印「磁盘 vs 模型可见」对照。**故意不叫 `*.test.mjs`** —— 它没有测试项，命名成测试文件会白白抬高 `node --test` 的计数、让「84 项」这个对照基准漂移 |
+| `test/log-inspect.mjs` | **只读**会话日志诊断器（3.6）：解压 `session.v4.jsonl.zstd`、列墓碑、独立复刻 surface 代数、打印「磁盘 vs 模型可见」对照。**故意不叫 `*.test.mjs`** —— 它没有测试项，命名成测试文件会白白抬高 `node --test` 的计数、让「196 项」这个对照基准漂移。它是**取证工具**，用法与两个必知的实现细节见第 9 节 |
 | `test/fake-session.mjs` | 假内核：复刻 append 时的 surface 校验规则，让区间算错在离线阶段就失败 |
 | `test/v4-load-check.mjs` | 用 DSH 安装目录里**真实的** v4 加载校验器检查会话日志，并在内存里逐轮模拟删除（坑 ⑪ 的防线）。依赖本机 DSH 安装，**不进** `npm test` |
 | `package.json` | `main` / `exports`（`.` 与 `./client`）、`dsh.bundle.patch`、`dsh.client.platform = web` |
@@ -309,7 +309,9 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 **已知限制（必须如实写进文档，不许假装统计全了）**：
 
 - 宿主的作业列表**按所有者隔离**（`jobs.list(caller)` 只给调用者自己的 + 无主作业），所以「后台任务在跑」这一项**看不到别的会话启动的任务**；别的会话只能靠 agent 的 `running` 状态发现。
-- **桌面启动器（DSHL）托管的实例：重启后会变成孤儿进程**。实测（v1.1.0）：重启成功、辅助进程也没被杀，但**启动器认不出新进程**——实例从它的列表里消失，它既看不到也停不掉（要从任务管理器收尸），还可能允许对同一个 profile 再启动一次（两个实例争端口）。这需要启动器提供重启接口才能解决，而计划明确「不控制 DSHL、不假设它有这种接口」，所以只能文档化。
+- **桌面启动器（DSHL）托管的实例：重启后会变成孤儿进程**。实测（v1.1.0）：重启成功、辅助进程也没被杀，但**启动器认不出新进程**——实例从它的列表里消失，它既看不到也停不掉（要从任务管理器收尸），还可能允许对同一个 profile 再启动一次（两个实例争端口）。
+  - 机制（读启动器日志与其二进制字符串得出）：它**按自己 spawn 的子进程 PID** 认实例（就绪判定 = 读子进程 stdout 的登录横幅）；进程一退出就记「已退出」；只有**它自己启动时**才做一次「核验并恢复监控」，判据是 `实例记录 {0} 的进程已退出或身份不符，未接管` ⇒ 新 PID 不会被认领。它的对接记录是不透明的加密文件（`%LOCALAPPDATA%\DSHL\Sessions\*.session`），**不要**去改写它。
+  - 这需要启动器提供重启接口才能解决，而计划明确「不控制 DSHL、不假设它有这种接口」，所以只能文档化。
 
 **界面**：设置页一页（`settings.section`，id `agent-control-restart`）+ `shell.overlay` 里的**非阻塞横幅**。⚠️ **不做自动 `location.reload()`**——S4 实测页面会自己恢复；只有失败态里用户点「刷新页面」才 reload。横幅在设置面板打开时会被挡住（overlay 的 z-index 低于面板），进度此时显示在设置页那一行里。
 
@@ -410,13 +412,15 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 对**四个** `src/*.mjs` 与 `client.js`、`test/log-inspect.mjs`、`test/v4-load-check.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（84 项）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清。
+- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**196 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
-- ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，四个测试文件全 ✖、`pass 0 fail 4`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
+- ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：`node test/client.test.mjs`、`node test/session-delete.test.mjs`、`node test/turn-delete.test.mjs`、`node test/host.test.mjs` 逐个直接执行，同样 84 项全绿（28 + 25 + 23 + 8）。
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（29）、`node test/client.test.mjs`（43）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（23），合计同样是 **196 项全绿**。
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
-- DSH 数据目录为 `$DSH_HOME`（默认 `~/.dsh`）；本插件**不建自己的数据目录**（3.8），不要去 `$DSH_HOME/agent-control/` 找东西。
+- ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
+- ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
+- DSH 数据目录为 `$DSH_HOME`（默认 `~/.dsh`）；本插件**只有热重启那一处受控例外**会落盘：`$DSH_HOME/agent-control/restart/`（3.8 列了三个文件与各自的生命周期）。删除类功能仍然**不建任何数据目录**，不要去那里找删除相关的东西。
 - **客户端测试不需要真 react**：`client.test.mjs` 用记账替身调用组件，因此不依赖运行时里有没有 react，也不依赖 DOM。它验证的是**注册形状、每处 `require` 解构出来的东西、以及组件能否被构造**（这三类正是最容易静默失效的地方），**不验证真实渲染**——那必须靠第 9 节的界面实测。
 - 写代码前用 `cordis_inspect_list` / `cordis_inspect_query` 查 Service 契约、Event、Config schema、Slot 树与主题 token，不要猜名字。
 - **本机特有的信息不写进本文件**（操作系统、安装路径、用户名、实例名、端口、网络/沙箱怪癖）。需要记录时写到 `AGENTS.local.md`，并确保它在 `.gitignore` 里。

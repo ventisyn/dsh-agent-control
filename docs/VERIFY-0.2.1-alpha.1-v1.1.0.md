@@ -66,13 +66,13 @@
 
 ```
 node test/restart.test.mjs          54 / 54 pass
-node test/restart-helper.test.mjs   21 / 21 pass
+node test/restart-helper.test.mjs   22 / 22 pass
 node test/host.test.mjs             29 / 29 pass
 node test/client.test.mjs           43 / 43 pass
 node test/turn-delete.test.mjs      25 / 25 pass
 node test/session-delete.test.mjs   23 / 23 pass
                                     ─────────────
-                                    195 项全绿
+                                    196 项全绿
 ```
 
 `npm test` 里的 `node --check` 覆盖 17 个 `.mjs`/`.js` 文件（本机沙箱下 `node --test` 那一步会 `spawn EPERM` 假失败，所以测试逐个直跑，见 AGENTS.md 第 5 节）。
@@ -87,8 +87,10 @@ node test/session-delete.test.mjs   23 / 23 pass
 
 ```json
 { "ok": true, "version": "0.2.1-alpha.1-v1.1.0", "bootId": "b-…", "pid": 21952, "startedAt": …,
-  "port": 10725, "canRestart": true, "blockers": { "sessions": [], "jobs": 0 }, "pending": null, "last": null }
+  "port": 3080, "canRestart": true, "blockers": { "sessions": [], "jobs": 0 }, "pending": null, "last": null }
 ```
+
+（端口是占位值：AGENTS.md 第 8 节要求仓库里不写本机端口，真实端口记在 `AGENTS.local.md`。）
 
 ### 6.2 安全：无凭据的 POST 被拒 ✅（实测结论与计划的预期不同）
 
@@ -187,21 +189,69 @@ node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> session-38607d8e-…
 | DSHL 是否认得重启后的新进程 | **不认得**。用户观察到 DSHL 的实例列表里**不再显示这个实例**，而它其实还活着 |
 
 → 结论：**`CREATE_BREAKAWAY_FROM_JOB` 那条退路不需要实现**；但热重启在 DSHL 托管的用法下会交出一个**孤儿进程**——DSHL 里看不到、也停不掉它，还可能允许对同一个 profile 再启动一次（两个实例争端口）。这条已写进 README 与 AGENTS.md 的已知限制。
-（未验证：DSHL 是暂时没跟上还是永远不会重新发现它；「放生的实例 + 再点一次启动」会发生什么——故意没试，避免在同一台机器上制造第二份写同一 `$DSH_HOME` 的实例。）
+
+**DSHL 的实例识别机制（读它自己的日志与二进制字符串得出，不是猜）**：
+
+| 问题 | 答案 | 证据 |
+| --- | --- | --- |
+| 它靠什么认一个实例 | **它自己 spawn 的那个子进程 PID**（外加子进程 stdout 里的 `dsh web: …?token=…` 横幅用于判就绪） | 日志：`启动命令（原生）："…dsh.cmd" --profile restart-proto --port <端口> --no-open` → `Harness 进程已启动（原生），PID 25508` → `<34 · Harness Watcher PID 25508> … 已就绪：http://…（判定依据：token 横幅）` → 我们重启后同一行 watcher 记 `已退出（代码 0）` |
+| 会不会事后重新发现 | **不会（运行期间）**。它只在**自己启动时**做一次「核验并恢复监控」，判据是记录的进程**是否还活着 + 身份是否相符** | 二进制字符串：`实例记录 {0} 的进程已退出或身份不符，未接管。`、`无法读取实例恢复记录，已跳过（不会接管或终止进程）`、`保留实例并退出` / `会保存对接记录，下次启动自动核验并恢复监控` |
+| 它把记录存在哪 | `%LOCALAPPDATA%\DSHL\Sessions\<id>.session`，**加密/不透明**（998 字节高熵数据，解码后无任何可读字段） | 实测解码该文件 |
+| 能不能让辅助进程去更新它 | **不能，也不该做**：格式不透明、判据是 PID，而且那是第三方启动器的私有实现——AGENTS.md 反复禁止依赖这类内部结构（换一个版本就静默失效） |
+
+（仍未验证：DSHL 是暂时没跟上还是永远不会重新发现；「放生的实例 + 再点一次启动」会发生什么——故意没试，避免在同一台机器上制造第二份写同一 `$DSH_HOME` 的实例。）
+
+### 6.11 插件行的 `config:` 真的会传进 `apply` ✅
+
+评审的担心：如果 Loader 不把插件行的 `config` 交给 `apply`，`auto` 会**静默不生效**（回退方向是 `ask`，所以安全，但没人验证过）。
+
+做法：把仓库 `cordis.patch.yml` 里的 `approval` 从 `ask` 改成 `auto` → 重启备用实例 → 读 `/restart/status` 里本轮新增的 `approvalMode` 字段：
+
+| 插件行里的值 | 状态接口报告 |
+| --- | --- |
+| `approval: auto` | `"approvalMode": "auto"` |
+| `approval: ask`（改回） | `"approvalMode": "ask"` |
+
+⇒ 配置**确实**到了 `apply`，而且跟着配置走（不是硬编码）。`approvalMode` 就是为「可验证」加进状态接口的：读代码推断不算数，能看见才算。
+
+### 6.12 过期 pending 被丢弃 ✅
+
+把一条 `createdAt` = 11 分钟前的 `pending.json` 手工写进交接目录，然后用**原型插件的路由**触发重启（它不写 pending，所以不会被覆盖）：
+
+- 重启后 `pending.json` **被删掉**（目录里只剩 `last.json`）；
+- `last.json` = `{ restartId: "r-stale-probe", source: "model", reason: "过期待办探针…", resume: "none" }`——**没有投递续作消息**，符合「过期就丢弃、只记 warn」。
+
+⚠️ 「记 warn」这半条**取不到证**：`ctx.logger` 的输出在这个部署里没有落点——实例 stdout 里没有（日志文件只有那一行 token 横幅），`$DSH_HOME` 下也没有日志文件，连原型插件自己的 `logger.info` 都一无所踪。所以凡是**必须让人看见**的信息，本插件一律写进 `last.json` / HTTP 响应 / 续作消息，不依赖 logger。
+
+### 6.13 新进程起不来 ⇒ 失败态 + 日志文件名 ✅（并修掉一个真 bug）
+
+把一次性 profile 的用户层 patch 故意写坏（YAML 缩进错）→ 触发一次重启 → 新进程加载 profile 失败、立刻退出：
+
+```json
+{ "restartId": "r-muuaiy0w-…", "ok": false, "stage": "spawn", "durationMs": 760,
+  "error": "新进程启动后立刻退出（退出码 1）",
+  "logFile": "…/logs/agent-control-restart-20261005-044439.log", "newPid": 10496 }
+```
+
+- **760 毫秒**就定性，没有耗满 90 秒的 `readyMs`：辅助进程看到子进程立刻退出就直接判失败（这正是「不无限转圈」）；
+- 日志文件里是**原始错误**：`failed to parse overlay … YAMLException: bad indentation of a mapping entry (9:4)`，界面拿到文件名就能指路。
+
+**顺带发现并修掉的 bug**：失败时 `spec.json`（含环境变量）与 `pending.json` **都留在盘上**。后者更糟——用户下次手动启动时，新进程会读到一条「上次那次其实失败了的热重启」待办，投出一条**声称已经重启过**的续作消息（通知一件没发生的事）。修法：辅助进程**成功时删 `spec.json`**（pending 留给新进程投递）、**失败时两份都删**，失败原因只留在 `last.json`。已加两条测试（成功：spec 删 / pending 留；失败：两份都删）。
 
 ## 7. 本机环境事实（供排障参考）
 
 - **沙箱下的 `node` 看到的 `os.tmpdir()` 是私有的临时目录**，与实例进程看到的真实 `%TEMP%` 不是同一个；同理 `$env:TEMP` 在沙箱里也被改写。写诊断脚本时要显式给出真实路径。
 - 会话日志是**多帧拼接**的 zstd：`createZstdDecompress()` + 整块 `end()` 在本机实测**只解出第一帧**（253 字节的会话头），要按魔数 `28 b5 2f fd` 逐帧切。
 - 实例日志里的中文要用 UTF-8 读，否则本机默认编码下显示成乱码。
+- ⚠️ **PowerShell 陷阱**：`(Get-Content x) -replace … | Set-Content x -NoNewline` 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（我因此报废过三个 markdown 文件，只能从 git 恢复）。批量改文本要用编辑工具，或显式 `-join "\`n"`。
 
 ## 8. 未验证（不要当成通过）
 
-1. **DSHL 托管下的收尾没有解决**（S1 本身已回答，见 6.10）：热重启会把实例交成一个 DSHL 不再跟踪的**孤儿进程**——DSHL 里看不到、停不掉。本插件按计划不控制 DSHL，只能文档化。**DSHL 是暂时没跟上还是永远不会重新发现那个进程，没有长时间复看**；「放生的实例 + 再点一次启动」会发生什么也**故意没试**（避免在同一台机器上制造第二份写同一 `$DSH_HOME` 的实例）。
+1. **DSHL 托管下的收尾没有解决**（S1 本身已回答，见 6.10）：热重启会把实例交成一个 DSHL 不再跟踪的**孤儿进程**——DSHL 里看不到、停不掉，机制见 6.10 的表（判据是它 spawn 的 PID，运行期间不重扫，只有它自己启动时才核验一次）。本插件按计划不控制 DSHL，只能文档化。
 2. **主实例（本会话所在的实例）上没跑过热重启**：所有真机结论都来自一次性备用实例（其中一次由 DSHL 拉起）。要在主实例上用，得先把插件装进主 profile，并接受一次会话中断。
 3. **`--port 0`（OS 随机端口）**：`pinPortIfNeeded` 有离线测试，未真机验证。
-4. **计划验收里没跑到的几条**（都有离线测试，但没有真机样本）：第 7 条（另一个会话在跑 ⇒ `RESTART_BLOCKED`）、第 9 条（限频第 4 次被拒 / 同会话 60 秒冷却）、第 10 条（并发 ⇒ `RESTART_IN_PROGRESS`）、第 11 条（新进程起不来 ⇒ 失败态与日志文件名）、第 12 条（过期 pending 被丢弃）。
+4. **计划验收里还剩两条没有真机样本**：第 7 条（另一个会话在跑 ⇒ `RESTART_BLOCKED`）与第 9/10 条（限频第 4 次被拒 / 同会话 60 秒冷却 / 并发 ⇒ `RESTART_IN_PROGRESS`）——它们都有离线测试，但没在真机上制造过那种现场。（第 11、12 条本轮已补，见 6.12、6.13。）
 5. **`appExit` 在「有正在跑的后台任务 / 终端」时是否同样快**：本轮实例都是空的。
 6. **界面**：截图只覆盖「空闲态」的设置页（明/暗各一张，用户提供）；**重启中 / 失败态的横幅没有截图**，且横幅在设置面板打开时会被挡住（`shell.overlay` 的 z-index 低于设置面板）——是否要改尚未决定。
-7. **`config: { approval: ask }` 的真实 mount** 没有单独取证（只 dump 过 + 端到端里行为正常）。
+7. **`ctx.logger` 的落点未知**（见 6.12 的 ⚠️）：这个部署里它的输出哪里都看不到，所以插件的告警实际上只靠 `last.json` / 响应体 / 续作消息传达。
 8. **`blockers.sessions[].descendant`**：状态接口**刻意不发**这个字段（状态页不排除任何会话，没有「调用者」可作参照，带了恒为假），界面里的「（子代理）」标记因此不会出现。
