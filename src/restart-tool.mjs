@@ -1044,6 +1044,10 @@ export function buildRestartStatus(ctx, deps) {
     pid: deps.pid,
     startedAt: deps.startedAt,
     port: deps.port ?? null,
+    // 生效的审批策略：模型工具默认要过审批（`ask`），配置成 `auto` 才免审批。
+    // 把它放进状态里是**刻意的**：插件行的 `config:` 到底有没有被 Loader 传到 `apply`，
+    // 靠读代码推断不算数，能在这里看见才算实测（见 docs/VERIFY-*.md）。
+    approvalMode: deps.approvalMode,
     canRestart: preflight.ok === true && blockerFailure === '',
     blockers: {
       sessions: Array.isArray(blockers?.sessions)

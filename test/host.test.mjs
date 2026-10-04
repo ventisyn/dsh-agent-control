@@ -133,8 +133,8 @@ async function call(host, routePath, { method = 'POST', body = '', query = '', h
   req.url = routePath + query
   // 默认给一个「同源浏览器 POST」的头：Origin 与 Host 一致，content-type 是 JSON。
   req.headers = {
-    host: '127.0.0.1:10727',
-    origin: 'http://127.0.0.1:10727',
+    host: '127.0.0.1:3080',
+    origin: 'http://127.0.0.1:3080',
     'content-type': 'application/json',
     ...headers,
   }
@@ -277,15 +277,15 @@ test('重启错误码到 HTTP 状态的映射：403 / 403 / 409 / 409 / 429 / 50
 })
 
 test('可信校验：同源放行、无 Origin 无自定义头拒绝、宿主拒绝照抄、Origin 与 Host 必须一致', () => {
-  const sameOrigin = { host: '127.0.0.1:10727', origin: 'http://127.0.0.1:10727' }
+  const sameOrigin = { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' }
   assert.equal(checkRestartTrust(sameOrigin, undefined), undefined, '同源 POST 放行')
   assert.equal(checkRestartTrust(sameOrigin, 401), 401, '宿主鉴权结论优先，照抄')
   assert.equal(checkRestartTrust(sameOrigin, 403), 403)
-  assert.equal(checkRestartTrust({ host: '127.0.0.1:10727' }, undefined), 403, '没有 Origin 就必须带自定义头')
-  assert.equal(checkRestartTrust({ host: '127.0.0.1:10727', 'x-dsh-agent-control': '1' }, undefined), undefined)
-  assert.equal(checkRestartTrust({ host: '127.0.0.1:10727', origin: 'http://evil.example' }, undefined), 403, 'Origin 的 host 必须等于 Host')
-  assert.equal(checkRestartTrust({ origin: 'http://127.0.0.1:10727' }, undefined), 403, '没有 Host 头就无法比对')
-  assert.equal(checkRestartTrust({ host: '127.0.0.1:10727', origin: 'null' }, undefined), 403, '解析不出来的 Origin 不可信')
+  assert.equal(checkRestartTrust({ host: '127.0.0.1:3080' }, undefined), 403, '没有 Origin 就必须带自定义头')
+  assert.equal(checkRestartTrust({ host: '127.0.0.1:3080', 'x-dsh-agent-control': '1' }, undefined), undefined)
+  assert.equal(checkRestartTrust({ host: '127.0.0.1:3080', origin: 'http://evil.example' }, undefined), 403, 'Origin 的 host 必须等于 Host')
+  assert.equal(checkRestartTrust({ origin: 'http://127.0.0.1:3080' }, undefined), 403, '没有 Host 头就无法比对')
+  assert.equal(checkRestartTrust({ host: '127.0.0.1:3080', origin: 'null' }, undefined), 403, '解析不出来的 Origin 不可信')
   assert.equal(checkRestartTrust(undefined, undefined), 403, '连头都没有：拒绝')
 
   assert.equal(isJsonRequest({ 'content-type': 'application/json' }), true)
@@ -580,6 +580,7 @@ test('GET /restart/status：形状齐全，blockers 按现场计数', async (t) 
   for (const key of ['ok', 'bootId', 'pid', 'startedAt', 'port', 'canRestart', 'blockers', 'pending', 'last']) {
     assert.equal(Object.hasOwn(response.body, key), true, `状态里必须有 ${key}`)
   }
+  assert.equal(response.body.approvalMode, 'ask', '没给配置时缺省走审批（模型工具）')
   assert.equal(response.body.ok, true)
   assert.equal(typeof response.body.bootId, 'string')
   assert.equal(response.body.pid, process.pid)
@@ -758,8 +759,8 @@ test('审批策略配置手工校验：只认 ask / auto，未知值回退 ask',
 
 test('启动参数重放：--port 0（OS 随机端口）时把真实端口原地钉住，别让新进程换端口', () => {
   const argv = ['/x/bin.js', '--profile', 'web', '--no-open', '--port', '0']
-  assert.deepEqual(pinPortIfNeeded(argv, { pin: true, port: 10727 }), ['/x/bin.js', '--profile', 'web', '--no-open', '--port', '10727'])
-  assert.deepEqual(pinPortIfNeeded(argv, { pin: false, port: 10727 }), argv, '不钉端口时原样重放')
+  assert.deepEqual(pinPortIfNeeded(argv, { pin: true, port: 3080 }), ['/x/bin.js', '--profile', 'web', '--no-open', '--port', '3080'])
+  assert.deepEqual(pinPortIfNeeded(argv, { pin: false, port: 3080 }), argv, '不钉端口时原样重放')
   assert.deepEqual(pinPortIfNeeded(argv, { pin: true, port: 0 }), argv, '拿不到真实端口就不动它')
   assert.deepEqual(
     pinPortIfNeeded(['/x/bin.js', '--port=0', '--', 'positional'], { pin: true, port: 4321 }),
@@ -770,8 +771,8 @@ test('启动参数重放：--port 0（OS 随机端口）时把真实端口原地
 
   // 端到端一点：webStartup.port === 0 时，deps 里重放用的 argv 与就绪探针地址都用真实端口。
   const { ctx } = makeToolContext({ webStartup: { port: 0 } })
-  ctx.webServer = { port: 10727, host: '127.0.0.1' }
+  ctx.webServer = { port: 3080, host: '127.0.0.1' }
   const deps = makeRestartDeps(ctx, { dshHome: os.tmpdir(), argv: ['/x/bin.js', '--port', '0'] })
-  assert.deepEqual(deps.argvForReplay, ['/x/bin.js', '--port', '10727', '--no-open'], '钉住端口 + 补 --no-open')
-  assert.equal(deps.statusUrl, 'http://127.0.0.1:10727/api/agent-control/restart/status')
+  assert.deepEqual(deps.argvForReplay, ['/x/bin.js', '--port', '3080', '--no-open'], '钉住端口 + 补 --no-open')
+  assert.equal(deps.statusUrl, 'http://127.0.0.1:3080/api/agent-control/restart/status')
 })
