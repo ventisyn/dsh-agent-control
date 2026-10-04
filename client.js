@@ -54,37 +54,67 @@
     dialog: 'agent-control-dialog',
   }
 
-  /** 菜单项样式：危险操作用错误色，与原生菜单项同高。 */
-  const MENU_ITEM_STYLE = {
+  /**
+   * 菜单项兜底样式（仅在原生 `MenuItemButton` 拿不到时使用）。
+   *
+   * 度量抄自原语库 `Menu.module.css` 的 `.item` / `.danger`：最小高度 34、内边距 6×8、
+   * 13px/20px 字、间距 6、圆角 `--dsw-radius-md`、危险色 `--dsw-alias-state-error-primary`。
+   * 正常路径不会用到它——原生行才是「与其它按钮同尺寸」的保证。
+   */
+  const MENU_ITEM_FALLBACK_STYLE = {
     display: 'flex',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    boxSizing: 'border-box',
     width: '100%',
-    padding: '6px 10px',
+    minHeight: 34,
+    padding: '6px 8px',
     border: 'none',
+    borderRadius: 'var(--dsw-radius-md, 8px)',
     background: 'transparent',
     color: 'var(--dsw-alias-state-error-primary, #e5484d)',
     font: 'inherit',
+    fontSize: 13,
+    lineHeight: '20px',
     textAlign: 'left',
     cursor: 'pointer',
-    borderRadius: 6,
   }
 
-  const ICON_BUTTON_STYLE = {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 28,
-    height: 28,
-    padding: 6,
-    border: 'none',
-    borderRadius: 28,
-    background: 'transparent',
-    color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
-    cursor: 'pointer',
-  }
+  /**
+   * 回复操作条里的图标按钮样式。
+   *
+   * 度量抄自 `dsh-client-ui-chat` 的 `MessageIconActions.module.css` 的 `.action`
+   * （28×28、内边距 6、`--dsw-radius-sm`、tertiary 色，悬停换 `interactive-bg-hover` 与 secondary 色）。
+   * 悬停与禁用态是伪类，内联样式表达不了，所以注入一段带本插件前缀的样式表，见 `ensureStyles`。
+   */
+  const ACTION_CLASS = 'dsh-agent-control-action'
+  const STYLE_TAG_ID = 'dsh-agent-control/styles'
+  const STYLE_CSS = [
+    `.${ACTION_CLASS}{display:inline-flex;align-items:center;justify-content:center;flex:none;`
+      + 'box-sizing:border-box;width:calc(28px + var(--dsh-content-font-delta,0px));'
+      + 'height:calc(28px + var(--dsh-content-font-delta,0px));padding:6px;border:none;'
+      + 'border-radius:var(--dsw-radius-sm);background:transparent;'
+      + 'color:var(--dsw-alias-label-tertiary);cursor:pointer}',
+    `.${ACTION_CLASS} svg{width:calc(17px + var(--dsh-content-font-delta,0px));`
+      + 'height:calc(17px + var(--dsh-content-font-delta,0px))}',
+    `.${ACTION_CLASS}:hover{background:var(--dsw-alias-interactive-bg-hover);`
+      + 'color:var(--dsw-alias-label-secondary)}',
+    `.${ACTION_CLASS}:focus-visible{outline:1.5px solid var(--dsw-focus-ring-color,`
+      + 'var(--dsw-alias-state-business-primary));outline-offset:1px}',
+    `.${ACTION_CLASS}[data-unavailable]{cursor:default;opacity:.4}`,
+    `.${ACTION_CLASS}[data-unavailable]:hover{color:var(--dsw-alias-label-tertiary);background:none}`,
+  ].join('')
 
-  const BUSY_BUTTON_STYLE = { ...ICON_BUTTON_STYLE, opacity: 0.4, cursor: 'default' }
+  /** 注入一次样式表；没有 document（离线测试）或已注入时什么都不做。 */
+  function ensureStyles() {
+    if (typeof document === 'undefined' || document === null) return
+    if (document.querySelector?.(`style[data-plugin-css="${STYLE_TAG_ID}"]`) != null) return
+    const tag = document.createElement('style')
+    tag.dataset.plugin = PLUGIN_ID
+    tag.dataset.pluginCss = STYLE_TAG_ID
+    tag.textContent = STYLE_CSS
+    document.head?.appendChild(tag)
+  }
 
   /** 原生图标拿不到时的垃圾桶（内联 SVG，不依赖任何包）。 */
   function FallbackTrashIcon(props) {
@@ -238,6 +268,9 @@
   let React
   let IconTrashOutlineRegular
   let RiskConfirmation
+  /** 原生菜单行 / 气泡提示；拿不到时为 undefined，组件退回自带样式。 */
+  let MenuItemButton
+  let Tooltip
   let localeService
   let sessionsService
 
@@ -314,11 +347,18 @@
           title: props.displayTitle || props.sessionId,
         })
       }, [closeMenu, props.sessionId, props.displayTitle])
+      const label = t('menu.deleteSession')
+      const icon = react.createElement(IconTrashOutlineRegular, { size: 14 })
+      // 正常路径：原生菜单行——与置顶 / 重命名 / 分叉 / 归档同一套度量与悬停态，
+      // 危险色与危险悬停底由 `danger` 给出，前面带一条分组细线（与普通操作分开）。
+      if (MenuItemButton !== undefined) {
+        return react.createElement(MenuItemButton, { icon, danger: true, separatorBefore: true, onSelect: onClick }, label)
+      }
       return react.createElement(
         'button',
-        { type: 'button', role: 'menuitem', onClick, style: MENU_ITEM_STYLE },
-        react.createElement(IconTrashOutlineRegular, { size: 16 }),
-        t('menu.deleteSession'),
+        { type: 'button', role: 'menuitem', onClick, style: MENU_ITEM_FALLBACK_STYLE },
+        icon,
+        label,
       )
     }
 
@@ -332,18 +372,19 @@
         requestDelete({ kind: 'turn', sessionId, assistantMessageId: String(messageId) })
       }, [running, messageId, sessionId])
       const label = running ? t('button.deleteTurnBusy') : t('button.deleteTurn')
-      return react.createElement(
-        'button',
-        {
-          type: 'button',
-          title: label,
-          'aria-label': label,
-          'aria-disabled': running ? 'true' : undefined,
-          onClick: running ? undefined : onClick,
-          style: running ? BUSY_BUTTON_STYLE : ICON_BUTTON_STYLE,
-        },
-        react.createElement(IconTrashOutlineRegular, { size: 16 }),
-      )
+      // 与同一操作条里的「复制 / 分叉」同款：28×28 图标按钮 + 底部气泡提示（不用浏览器自带的 title）。
+      const buttonProps = {
+        type: 'button',
+        className: ACTION_CLASS,
+        'aria-label': label,
+        'aria-disabled': running ? 'true' : undefined,
+        'data-unavailable': running ? 'true' : undefined,
+        onClick: running ? undefined : onClick,
+      }
+      const icon = react.createElement(IconTrashOutlineRegular, {})
+      // 气泡提示拿不到时退回浏览器自带的 title。
+      if (Tooltip === undefined) return react.createElement('button', { ...buttonProps, title: label }, icon)
+      return react.createElement(Tooltip, { label, side: 'bottom' }, react.createElement('button', buttonProps, icon))
     }
 
     /**
@@ -876,7 +917,8 @@
     ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
       name: 'sidebar.workspaces.session.menu.item',
       id: ENTRY.sessionMenu,
-      order: 40,
+      // 原生项是 100 置顶 / 200 重命名 / 300 分叉 / 400 归档；破坏性操作排在最后。
+      order: 500,
     }, ui.SessionMenuDelete))
 
     ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
@@ -939,6 +981,9 @@
       RiskConfirmation = typeof primitives?.RiskConfirmation === 'function'
         ? primitives.RiskConfirmation
         : FallbackRiskConfirmation
+      MenuItemButton = typeof primitives?.MenuItemButton === 'function' ? primitives.MenuItemButton : undefined
+      Tooltip = typeof primitives?.Tooltip === 'function' ? primitives.Tooltip : undefined
+      ensureStyles()
       return { apply, inject: ['slots'] }
     },
   })

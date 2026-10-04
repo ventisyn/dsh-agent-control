@@ -6,7 +6,7 @@
 
 > ✅ **轮次删除已恢复（当前 dev 分支）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 83 项通过（v1.0.0 真机复验时是 51 项）。** 实测结论：
+> ⚠️ **现状：离线测试 84 项通过（v1.0.0 真机复验时是 51 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在 当前 dev 分支 实测中残留**（见 3.3）
 > - **拒绝路径**：`SESSION_LIVE`（409）、`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）
@@ -45,7 +45,7 @@
 | `src/shared.mjs` | host 与 client 共用的常量与纯工具（路由路径、错误码、id 校验、轮次括号） |
 | `client.js` | 浏览器端 bundle，经 `window.__ModuleLoader__.load({ id: 'dsh-agent-control', factory })` 注册 |
 | `test/*.test.mjs` | 离线测试（`npm test` 的主体），四个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线（`host.test.mjs`：HTTP 状态映射与活会话闸门） |
-| `test/log-inspect.mjs` | **只读**会话日志诊断器（3.6）：解压 `session.v4.jsonl.zstd`、列墓碑、独立复刻 surface 代数、打印「磁盘 vs 模型可见」对照。**故意不叫 `*.test.mjs`** —— 它没有测试项，命名成测试文件会白白抬高 `node --test` 的计数、让「83 项」这个对照基准漂移 |
+| `test/log-inspect.mjs` | **只读**会话日志诊断器（3.6）：解压 `session.v4.jsonl.zstd`、列墓碑、独立复刻 surface 代数、打印「磁盘 vs 模型可见」对照。**故意不叫 `*.test.mjs`** —— 它没有测试项，命名成测试文件会白白抬高 `node --test` 的计数、让「84 项」这个对照基准漂移 |
 | `test/fake-session.mjs` | 假内核：复刻 append 时的 surface 校验规则，让区间算错在离线阶段就失败 |
 | `test/v4-load-check.mjs` | 用 DSH 安装目录里**真实的** v4 加载校验器检查会话日志，并在内存里逐轮模拟删除（坑 ⑪ 的防线）。依赖本机 DSH 安装，**不进** `npm test` |
 | `package.json` | `main` / `exports`（`.` 与 `./client`）、`dsh.bundle.patch`、`dsh.client.platform = web` |
@@ -58,8 +58,8 @@
 
 | 槽位 | entry id | order | 作用 |
 | --- | --- | --- | --- |
-| `sidebar.workspaces.session.menu.item` | `agent-control-session-menu` | 40 | 会话行「…」菜单里的删除项 |
-| `conversation.chat.assistant-actions` | `agent-control-turn-delete` | 90 | 每条已结束回复旁的垃圾桶按钮 |
+| `sidebar.workspaces.session.menu.item` | `agent-control-session-menu` | 500 | 会话行「…」菜单里的删除项（原生项是 100 置顶 / 200 重命名 / 300 分叉 / 400 归档，删除排最后；用原生 `MenuItemButton` 的 `danger` + `separatorBefore`） |
+| `conversation.chat.assistant-actions` | `agent-control-turn-delete` | 90 | 每条已结束回复旁的垃圾桶按钮（28×28、与「复制 / 分叉」同款，原生 `Tooltip` 气泡） |
 | `shell.overlay` | `agent-control-dialog` | 100 | 两种删除共用的确认弹窗 |
 | `conversation.chat.turnTail` | `agent-control-turn-marker` | 90 | 已删除轮次的隐藏标记 |
 
@@ -356,11 +356,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 对**四个** `src/*.mjs` 与 `client.js`、`test/log-inspect.mjs`、`test/v4-load-check.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（83 项）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清。
+- `npm test` = 对**四个** `src/*.mjs` 与 `client.js`、`test/log-inspect.mjs`、`test/v4-load-check.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（84 项）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
 - ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，四个测试文件全 ✖、`pass 0 fail 4`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：`node test/client.test.mjs`、`node test/session-delete.test.mjs`、`node test/turn-delete.test.mjs`、`node test/host.test.mjs` 逐个直接执行，同样 83 项全绿（27 + 25 + 23 + 8）。
+  2. **不 spawn 地跑**：`node test/client.test.mjs`、`node test/session-delete.test.mjs`、`node test/turn-delete.test.mjs`、`node test/host.test.mjs` 逐个直接执行，同样 84 项全绿（28 + 25 + 23 + 8）。
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - DSH 数据目录为 `$DSH_HOME`（默认 `~/.dsh`）；本插件**不建自己的数据目录**（3.8），不要去 `$DSH_HOME/agent-control/` 找东西。
 - **客户端测试不需要真 react**：`client.test.mjs` 用记账替身调用组件，因此不依赖运行时里有没有 react，也不依赖 DOM。它验证的是**注册形状、每处 `require` 解构出来的东西、以及组件能否被构造**（这三类正是最容易静默失效的地方），**不验证真实渲染**——那必须靠第 9 节的界面实测。

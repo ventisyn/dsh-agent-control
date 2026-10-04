@@ -176,6 +176,18 @@ const primitivesStub = {
       return { type: 'icon-trash', props }
     }
   },
+  get MenuItemButton() {
+    if (!primitivesAccess.includes('MenuItemButton')) primitivesAccess.push('MenuItemButton')
+    return function MenuItemButton(props) {
+      return { type: 'menu-item-button', props }
+    }
+  },
+  get Tooltip() {
+    if (!primitivesAccess.includes('Tooltip')) primitivesAccess.push('Tooltip')
+    return function Tooltip(props) {
+      return { type: 'tooltip', props }
+    }
+  },
   get RiskConfirmation() {
     if (!primitivesAccess.includes('RiskConfirmation')) primitivesAccess.push('RiskConfirmation')
     return function RiskConfirmation(props) {
@@ -297,7 +309,7 @@ test('bundle 用插件 id 注册，并导出 apply / inject', () => {
 
 test('factory 只 require 声明过的模块，且用到的导出名都取到了', () => {
   assert.deepEqual(requireCalls, ['react', '@deepseek-ai/dsh-client-ui-primitives'])
-  assert.deepEqual(primitivesAccess.sort(), ['IconTrashOutlineRegular', 'RiskConfirmation'])
+  assert.deepEqual(primitivesAccess.sort(), ['IconTrashOutlineRegular', 'MenuItemButton', 'RiskConfirmation', 'Tooltip'])
 })
 
 test('apply 注册四个槽位，且每个 list 槽位都带 id', () => {
@@ -459,15 +471,24 @@ test('会话菜单项点击会派发删除请求，带上 sessionId 与标题', 
     useMenuOpenState: () => [true, () => {}],
   })
 
-  const button = findElement(tree, (element) => typeof element.props?.onClick === 'function')
-  assert.ok(button, '菜单项必须有一个可点的元素')
-  button.props.onClick()
+  // 原生菜单行（MenuItemButton）：与其它会话操作同尺寸，激活回调是 onSelect。
+  assert.equal(tree.type.name, 'MenuItemButton', '必须用原生菜单行，才能与其它菜单项同尺寸')
+  assert.equal(tree.props.danger, true, '破坏性操作要用危险色')
+  assert.equal(tree.props.separatorBefore, true, '与普通操作之间要有分组细线')
+  assert.equal(typeof tree.props.onSelect, 'function')
+  tree.props.onSelect()
 
   assert.deepEqual(dispatched.at(-1), {
     kind: 'session',
     sessionId: 'session-7',
     title: '要被删掉的会话',
   })
+})
+
+test('删除项排在原生归档项（order 400）之后', () => {
+  loaded.apply(makeContext())
+  const entry = registrations.find((item) => item.name === 'sidebar.workspaces.session.menu.item')
+  assert.ok(entry.options.order > 400, '原生项是 100 置顶 / 200 重命名 / 300 分叉 / 400 归档')
 })
 
 test('运行中的 assistant 按钮禁用且不派发请求', () => {
