@@ -67,15 +67,15 @@
 ```
 node test/restart.test.mjs          54 / 54 pass
 node test/restart-helper.test.mjs   21 / 21 pass
-node test/host.test.mjs             28 / 28 pass
+node test/host.test.mjs             29 / 29 pass
 node test/client.test.mjs           43 / 43 pass
 node test/turn-delete.test.mjs      25 / 25 pass
 node test/session-delete.test.mjs   23 / 23 pass
                                     ─────────────
-                                    194 项全绿
+                                    195 项全绿
 ```
 
-（本机沙箱下 `npm test` 里的 `node --test` 会 `spawn EPERM` 假失败，所以逐个直跑，见 AGENTS.md 第 5 节。）
+`npm test` 里的 `node --check` 覆盖 17 个 `.mjs`/`.js` 文件（本机沙箱下 `node --test` 那一步会 `spawn EPERM` 假失败，所以测试逐个直跑，见 AGENTS.md 第 5 节）。
 
 ## 6. M6 真机端到端（一次性备用实例）✅
 

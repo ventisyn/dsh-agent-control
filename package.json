@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-control",
   "version": "0.2.1-alpha.1-v1.1.0",
-  "description": "DeepSeek Harness 插件：把「删除一个会话」与「从模型上下文中删除一轮对话」这两件破坏性操作收进一个插件，用同一套确认与失败语义管理。",
+  "description": "DeepSeek Harness 插件：把「删除一个会话」「从模型上下文中删除一轮对话」与「热重启 DSH 进程」这些破坏性操作收进一个插件，用同一套确认与失败语义管理。",
   "type": "module",
   "license": "MIT",
   "main": "./src/index.mjs",
@@ -21,7 +21,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --check src/index.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
+    "test": "node --check src/index.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
     "log:inspect": "node test/log-inspect.mjs"
   },
   "keywords": [
