@@ -42,9 +42,12 @@
 | `src/index.mjs` | host 端插件入口：`apply` / `inject` / `name`，注册 HTTP 路由与生命周期，只做接线，不写业务 |
 | `src/session-delete.mjs` | 会话删除：定位磁盘目录、停 agent、清工作区记账、确认删净（不 import cordis，可用假对象单测） |
 | `src/turn-delete.mjs` | 轮次删除：算轮次区间、算 surface 区间、追加删除事务（压缩同形四件套）、认识新旧两种删除记录 |
+| `src/restart.mjs` | **热重启的纯逻辑**：阻塞项计算、限频、启动规格（argv 重放）构造、`pending.json`/`last.json` 读写与过期判断（不 import cordis，可离线单测） |
+| `src/restart-helper.mjs` | **热重启的辅助进程**：旧进程退出后拉起新进程并探测就绪。单文件、只用 `node:*`、不 import 本仓库任何模块；由旧进程以 `detached` 派生，**活在旧进程之外** |
+| `src/restart-tool.mjs` | **热重启的接线**：`restart_harness` 工具定义 + 唯一入口 `requestRestart`（守卫、审批、单飞、退出时序），工具与 HTTP 路由共用它 |
 | `src/shared.mjs` | host 与 client 共用的常量与纯工具（路由路径、错误码、id 校验、轮次括号） |
 | `client.js` | 浏览器端 bundle，经 `window.__ModuleLoader__.load({ id: 'dsh-agent-control', factory })` 注册 |
-| `test/*.test.mjs` | 离线测试（`npm test` 的主体），四个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线（`host.test.mjs`：HTTP 状态映射与活会话闸门） |
+| `test/*.test.mjs` | 离线测试（`npm test` 的主体），六个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线、热重启纯逻辑、热重启辅助进程（`host.test.mjs`：HTTP 状态映射与活会话闸门） |
 | `test/log-inspect.mjs` | **只读**会话日志诊断器（3.6）：解压 `session.v4.jsonl.zstd`、列墓碑、独立复刻 surface 代数、打印「磁盘 vs 模型可见」对照。**故意不叫 `*.test.mjs`** —— 它没有测试项，命名成测试文件会白白抬高 `node --test` 的计数、让「84 项」这个对照基准漂移 |
 | `test/fake-session.mjs` | 假内核：复刻 append 时的 surface 校验规则，让区间算错在离线阶段就失败 |
 | `test/v4-load-check.mjs` | 用 DSH 安装目录里**真实的** v4 加载校验器检查会话日志，并在内存里逐轮模拟删除（坑 ⑪ 的防线）。依赖本机 DSH 安装，**不进** `npm test` |
@@ -211,13 +214,21 @@ GET  /api/agent-control/turns?sessionId=       # { ok, sessionId, turns: number[
                                                # 打开会话后与重启前逐字一致（VERIFY 第 10 节）
 POST /api/agent-control/session/delete         # { sessionId }
 POST /api/agent-control/turn/delete            # { sessionId, assistantMessageId }
+GET  /api/agent-control/restart/status         # { ok, bootId, pid, startedAt, port, canRestart, unsupportedReason?,
+                                               #   blockers: { sessions: [...], jobs: number }, pending, last }
+                                               # 热重启：**同时是辅助进程的就绪探针**，所以它必须允许无凭据访问；
+                                               # 只暴露状态，不接受任何状态变更
+POST /api/agent-control/restart                # { reason?, force? } → 202 { ok, restartId }
+                                               # 唯一会改变进程状态的接口 ⇒ 必须过可信校验（见下）
 ```
 
-失败一律 `{ ok: false, error: { code, message } }`，状态码由错误码映射（400 / 404 / 409 / 423 / 500）。**没有鉴权**：DSH 的插件自建路由不走 harness 的鉴权链路，谁都能访问这个端口就能调用删除。因此：
+失败一律 `{ ok: false, error: { code, message } }`，状态码由错误码映射（400 / 403 / 404 / 409 / 423 / 429 / 501）。**删除类的路由没有鉴权**：DSH 的插件自建路由不走 harness 的鉴权链路，谁都能访问这个端口就能调用删除。因此：
 
 - 请求体必须校验：字段存在、类型、id 形状（只允许 `[A-Za-z0-9._:-]`、拒绝 `..`）、长度上限、请求体上限 64 KiB
 - **不要在 UI 之外额外暴露批量删除**，除非当轮就想清楚误删的后果
 - 端口若绑到非回环地址（`webServer.config.host` 支持 `0.0.0.0`），等于把「删除我的会话」暴露给整个网络；文档与 README 里要写明
+- **`POST /restart` 是这里唯一会改变进程状态的接口，必须额外过可信校验**：优先用宿主公开的 `ctx.connection.requestRejection({ headers })`（它做的是宿主自己的 Host/Origin 校验，返回 401/403 就照抄）；拿不到该服务时退回自实现——`Origin` 存在时其 host 必须等于 `Host` 头，缺失 `Origin` 时必须带自定义头 `x-dsh-agent-control: 1`。缺了这道校验，任何能打开一个网页的人都能 CSRF 掉整个实例。
+- `GET /restart/status` **故意不做可信校验**：辅助进程在新进程刚起来、还没有任何凭据的时候就要靠它判断就绪。它只读、不改变任何状态，可以接受这个暴露面。
 
 **路由注册必须把 disposer 返回出去**（`ctx.effect(() => ctx.webServer.register({...}))`）：`register` 对重复 `(kind, path)` 会抛错；如果注册写成返回 `undefined` 的箭头函数，注销就完全靠 fiber 卸载——重复 `apply` 会撞上（第 4 节）。
 
@@ -254,6 +265,17 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ### 3.8 数据与运行环境（已实现）
 
 **这个插件自己不落任何数据文件**：没有配置、没有审计日志、没有缓存。唯一的持久事实是它写进会话日志的**墓碑**，那份数据归会话自己所有。删除操作的可观测性靠 harness 日志与接口响应，不要为了「看着专业」造一份本地流水。
+
+**唯一的受控例外：热重启的交接文件**（`<DSH_HOME>/agent-control/restart/`）。理由是这个功能**必须跨进程边界传递状态**——旧进程在退出前要把「重启后该做什么」交给一个还不存在的新进程，除了磁盘没有别的通道：
+
+| 文件 | 内容 | 生命周期 |
+| --- | --- | --- |
+| `pending.json` | 待续作的会话、原因、续作说明、`restartId`、状态 | 旧进程写；**新进程读一次就删**（至多投递一次，宁可漏不重复）；超过 10 分钟视为过期直接丢弃 |
+| `spec.json` | 重放启动所需的现场：`execPath`/`execArgv`/`argv`/`cwd`/**`env`** | 辅助进程读；**新进程启动后删**（含过期清理）。含环境变量，权限收到仅当前用户，且**绝不把 env 的值写进日志**（只记变量名数量） |
+| `last.json` | 最近一次重启的结果（时间、耗时、来源、原因、续作是否投递成功） | 给设置页显示，**不删** |
+| `<DSH_HOME>/logs/agent-control-restart-<时间戳>.log` | 新进程的 stdout/stderr | 辅助进程重定向写入；排障用，中文内容按 UTF-8 读 |
+
+除此之外**不要再往这个目录加东西**（不要审计流水、不要历史记录）：这个例外的边界就是「跨进程交接所必需」，任何可以放在内存或日志里的东西都不该落盘。
 
 `docs/VERIFY-*.md` 记录每次实测（第 9 节），那是给人和代理看的文档，不是运行时数据。
 
@@ -491,6 +513,21 @@ chore: bump version to 0.2.0-rc.2-v1.0.1
    - 取证的现成工具是 **`node test/log-inspect.mjs <会话 id>`**：它解压日志、列墓碑、独立复刻一次 surface 代数，并打印「磁盘 vs 模型可见」对照与被遮蔽内容的原文。**「删了没有 / 删对了没有 / 到底还留着什么」这三问都用它回答**，不要每次现写脚本（现写必然重踩下面这个坑）
    - ⚠️ **会话日志是多帧拼接的 zstd**：`zstdDecompressSync(buf)` **只解第一帧**，而第一帧只有 253 字节的会话头 —— 你会得到「这个会话只有 1 行」，看起来像日志被清空了。要按魔数 `28 b5 2f fd` 逐帧切（诊断器就是这么做的），或者 `createZstdDecompress()` 把整块 buffer **一次 `end()`**（分多次 `write()` 同样只解第一帧，且不报错）
 8. 把这次实测的结论与踩到的坑写进 `docs/VERIFY-<完整版本号>.md`，并回填本文件里所有「规划」标注
+
+### 热重启的改动，另外按这个顺序实测
+
+热重启的失败模式比删除更阴——**它会把用户正在用的实例弄没**，所以每条都要真跑，不接受「应该可以」：
+
+1. **先在备用实例上跑，再上主用实例**。备用实例用一次性 profile（`--from-default-profile web` 初始化），**不要**拿主实例当试验品。
+2. **安全回归**：不带 `Origin` 且不带自定义头的 `POST /restart` 必须 403；`Origin` 与 `Host` 不一致必须 403；非 JSON 的 `Content-Type` 必须 400。这三条用脚本每次都要重跑。
+3. **工具路径**：模型调用 `restart_harness`（带 `reason` 与 `resume_note`）→ 审批卡片里能看到 `reason` → 批准 → **本轮正常结束**（日志里 `tool/result` 之后是 `turn/end`，用 `test/log-inspect.mjs` 与 `test/v4-load-check.mjs` 各查一次）。
+4. **续作**：新进程起来后那个会话收到续作消息并**继续干活**，模型能复述重启原因。这是 S5，最容易只测一半。
+5. **阻塞路径**：另开一个会话跑长任务 → 工具调用被 `RESTART_BLOCKED` 拒绝，且文案告诉模型「等哪个会话结束」。
+6. **拒绝路径**：审批被拒 ⇒ `RESTART_DENIED` 且**进程没动**；重启进行中再请求 ⇒ `RESTART_IN_PROGRESS`；限频 ⇒ `RESTART_RATE_LIMITED`。
+7. **失败路径**：人为给 spec 一个坏参数 ⇒ 新进程起不来 ⇒ `last.json{ok:false}`，界面显示失败态与日志文件名，**不无限转圈**。
+8. **过期 pending**：手工把 `createdAt` 改成 11 分钟前 ⇒ 新进程丢弃、不投递、记 warn。
+9. **回归**：重启之后本插件原有的删除功能（会话列表、删会话、删轮次）仍然正常。
+10. **DSHL 托管的实例**必须至少跑一次端到端——辅助进程能不能活过由启动器拉起的父进程，只有在那种形态下才算验证过（`docs/SPIKE-hot-restart.md` 的 S1）。
 
 ## 10. 分支开发流程
 
