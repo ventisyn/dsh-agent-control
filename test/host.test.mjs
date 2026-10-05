@@ -6,7 +6,7 @@
  * 会话目录全部建在临时目录里（`DSH_HOME` 指过去），**绝不触碰真实 profile**。
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -618,7 +618,12 @@ test('GET /restart/status：形状齐全，blockers 按现场计数', async (t) 
   assert.equal(response.body.pid, process.pid)
   assert.equal(response.body.canRestart, true)
   assert.equal(Object.hasOwn(response.body, 'unsupportedReason'), false, '能重启就不该有原因')
-  assert.equal(response.body.version, '0.2.1-alpha.1-v1.1.0', '版本号读自插件自己的 package.json（设置页要显示）')
+  // 版本号从 `package.json` 现读，**不要在测试里硬编码**：写死的那一版在发 v1.1.1 时当场挂过
+  // （那是流程噪音，不是回归）。这里要验的是「状态里的版本来自插件自己的 package.json」。
+  const pluginVersion = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  ).version
+  assert.equal(response.body.version, pluginVersion, '版本号读自插件自己的 package.json（设置页要显示）')
   assert.deepEqual(response.body.blockers.sessions.map((row) => row.sessionId), ['session-a'])
   assert.equal(response.body.blockers.jobs, 1, 'jobs 是数量，而且只数在跑的')
   assert.equal(response.body.pending, null)

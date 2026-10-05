@@ -198,6 +198,12 @@ const primitivesStub = {
       return { type: 'risk-confirmation', props }
     }
   },
+  get Modal() {
+    if (!primitivesAccess.includes('Modal')) primitivesAccess.push('Modal')
+    return function Modal(props) {
+      return { type: 'modal-primitive', props }
+    }
+  },
   get Button() {
     if (!primitivesAccess.includes('Button')) primitivesAccess.push('Button')
     return function Button(props) {
@@ -330,6 +336,7 @@ test('factory 只 require 声明过的模块，且用到的导出名都取到了
     'IconRefreshOutlineRegular',
     'IconTrashOutlineRegular',
     'MenuItemButton',
+    'Modal',
     'RiskConfirmation',
     'Tooltip',
   ])
@@ -1867,6 +1874,19 @@ function findAllByClass(node, className) {
   return findAll(node, (element) => String(element.props?.className ?? '').split(/\s+/).includes(className))
 }
 
+/**
+ * 数一棵假元素树里「看起来能点」的控件。
+ *
+ * 关闭流程的信息型模态里必须一个都没有：真机上「看着能点、其实什么也不会发生」的控件
+ * 正是那次事故的观感来源（勾选框还在、「关闭 DSH」又可点）。
+ */
+function countClickables(node) {
+  return findAll(
+    node,
+    (element) => element.type === 'button' || element.type === 'input' || element.type?.name === 'Button',
+  ).length
+}
+
 /** 设置页里的重启主按钮（危险态）。 */
 const restartButtonIn = (tree) => findByClass(tree, 'dsh-agent-control-danger')
 
@@ -2050,7 +2070,7 @@ test('关闭按钮只派发 request-shutdown，确认框由同一个 overlay 宿
   assert.ok(confirmBox, '★ 确认框必须由同一个 overlay 宿主渲染')
   assert.equal(confirmBox.props.open, true)
   assert.equal(confirmBox.props.acknowledged, false, '必须仍然要求显式勾选')
-  assert.equal(confirmBox.props.disabled, false)
+  assert.equal(confirmBox.props.disabled, false, '还没提交，弹窗自己不该禁用')
   const description = String(confirmBox.props.description ?? '')
   assert.ok(description.includes('整个 DSH 进程'), '正文要写清会停止整个进程')
   assert.ok(description.includes('不会自动重启'), '正文要写清不会自动重启')
@@ -2058,15 +2078,22 @@ test('关闭按钮只派发 request-shutdown，确认框由同一个 overlay 宿
   assert.ok(description.includes('后台任务：2'), '★ 后台任务数也要列出来')
   assert.equal(restartApi().snapshot().phase, 'shutdown-confirming')
 
-  // 提交中：显示进度并禁用（不允许重复提交），也不能取消掉
+  // 提交出去之后：换成**信息型模态**，一个可点的控件都没有。
+  // 真机踩过：这里曾经退回确认框的样子（勾选框还在、「关闭 DSH」又可点），而真正说明
+  // 「正在关闭」的文案只在被它挡住的设置页与横幅里 —— 用户看到的是「点了没反应、然后页面死了」。
   restartApi().dispatch({ type: 'shutdown-submit' })
   broadcastRestartChanged(browser.listeners)
   const submitting = renderUntilStable(overlay.component, {})
-  const submittingBox = findElement(submitting, (element) => element.type?.name === 'RiskConfirmation')
-  assert.equal(submittingBox.props.disabled, true, '★ 提交中必须禁用确认按钮')
-  assert.equal(submittingBox.props.confirmLabel, '正在关闭…', '提交中要显示进度')
-  submittingBox.props.onCancel()
-  assert.equal(restartApi().snapshot().phase, 'shutdown-requested', '★ 提交中不允许取消把阶段拉回去')
+  assert.equal(
+    findElement(submitting, (element) => element.type?.name === 'RiskConfirmation'),
+    undefined,
+    '★ 请求在飞时不能再画确认框',
+  )
+  const pendingModal = findElement(submitting, (element) => element.type?.name === 'Modal')
+  assert.ok(pendingModal, '★ 改用信息型模态（portal 到 body，盖得住设置面板）')
+  assert.ok(collectText(pendingModal).join('\n').includes('正在请求关闭…'), '说清正在请求关闭')
+  assert.equal(countClickables(pendingModal), 0, '★ 一个可点的控件都不给')
+  assert.equal(restartApi().snapshot().phase, 'shutdown-requested', '没有任何控件能把阶段拉回去')
   restartApi().reset()
 })
 
@@ -2191,6 +2218,21 @@ test('关闭被接受后立刻进 closing：横幅说明、状态请求失败不
     assert.ok(card, '★ 关闭期间必须有非阻塞横幅')
     assert.ok(collectText(card).join('\n').includes('DSH 正在关闭…'), '横幅要说清正在关闭')
 
+    // ★ 真机事故的钉子：模态必须自己说清「正在关闭」。横幅会被设置面板挡住，
+    //   而这个模态是 portal 到 body 的、页面上唯一一定盖得住设置面板的表面。
+    const closingModal = findElement(closing, (element) => element.type?.name === 'Modal')
+    assert.ok(closingModal, '★ 关闭进行中必须有盖住整页的信息型模态')
+    const closingText = collectText(closingModal).join('\n')
+    assert.ok(closingText.includes('DSH 正在关闭…'), '模态标题要复用阶段文案')
+    assert.ok(closingText.includes('进程马上就要退出'), '模态要说清进程马上退出')
+    assert.ok(closingText.includes('页面会失去连接'), '模态要说清这个页面会失去连接')
+    assert.equal(
+      findElement(closing, (element) => element.type?.name === 'RiskConfirmation'),
+      undefined,
+      '★ 关闭进行中不能再出现确认框（勾选框 + 可点的「关闭 DSH」就是那次事故的样子）',
+    )
+    assert.equal(countClickables(closingModal), 0, '★ 关闭进行中的模态里一个可点的控件都没有')
+
     // 设置页那一行跟着同一份状态走：关闭中显示进度。
     const section = registrations.find((entry) => entry.name === 'settings.section')
     renderComponent(section.component, {})
@@ -2201,22 +2243,28 @@ test('关闭被接受后立刻进 closing：横幅说明、状态请求失败不
       '关闭进行中：按钮按进度改文案',
     )
 
-    // 再等一小段：落定 closed，横幅改成「可以关掉这个页面」并给提示。
+    // 再等一小段：落定 closed，横幅与模态都改成「可以关掉这个页面」并给提示。
     timers.runTimers()
     assert.equal(restartApi().snapshot().phase, 'closed')
     broadcastRestartChanged(browser.listeners)
     const closed = renderUntilStable(overlay.component, {})
     const closedCard = findByClass(closed, 'dsh-agent-control-banner-card')
-    assert.ok(closedCard, '落定之后横幅仍然在（它是页面仅剩的信息）')
+    assert.ok(closedCard, '落定之后横幅仍然在（面板关掉时看得见）')
     const closedText = collectText(closedCard).join('\n')
     assert.ok(closedText.includes('实例已关闭'), '★ 横幅要改说「实例已关闭」')
     assert.ok(closedText.includes('可以关掉这个页面'), '★ 要告诉用户可以关掉这个页面')
     assert.ok(closedText.includes('标签页'), '★ 给「关掉本页」的提示（而不是替用户关）')
-    assert.equal(
-      findAll(closed, (element) => element.type === 'button' || element.type?.name === 'Button').length,
-      0,
-      '★ 关闭落定后不给任何按钮：尤其不能有「重新加载」',
+    const closedModal = findElement(closed, (element) => element.type?.name === 'Modal')
+    assert.ok(closedModal, '★ 落定后模态还在，并改说「已关闭」')
+    const closedModalText = collectText(closedModal).join('\n')
+    assert.ok(closedModalText.includes('实例已关闭'), '模态要说「实例已关闭」')
+    assert.ok(closedModalText.includes('可以关掉这个页面'), '模态要说「可以关掉这个页面」')
+    const closedButtons = findAll(
+      closedModal,
+      (element) => element.type === 'button' || element.type?.name === 'Button',
     )
+    assert.equal(closedButtons.length, 1, '★ 落定后只给一个真实出口')
+    assert.equal(closedButtons[0].children?.[0], '知道了', '★ 是「知道了」，不是「重新加载」')
 
     // 落定之后设置页那一行也不再说「正在关闭…」（那会和「实例已关闭」自相矛盾）。
     broadcastRestartChanged(browser.listeners)
@@ -2458,5 +2506,202 @@ test('键值网格的值列必须封顶、标签不许折行（长原因会撑�
     /grid-template-columns:max-content max-content/,
     '★ 不许退回两个 max-content（真机踩过）',
   )
+})
+
+// ---------------------------------------------------------------------------
+// 关闭流程的模态形态（真机事故回归）
+//
+// 事故：点「关闭 DSH」→ 勾选 → 确认之后，弹窗退回普通确认框的样子（勾选框还在、
+// 「关闭 DSH」又可点），而真正说明「正在关闭」的文案只在被它挡住的设置页与横幅里；
+// 300 毫秒后进程退出，页面变死，用户看到的是「点了没反应、然后页面死了」。
+// 这个模态是 portal 到 body 的，是页面上唯一一定盖得住设置面板的表面，所以它必须自己说清状态。
+// ---------------------------------------------------------------------------
+
+test('关闭弹窗三种形状：确认型要勾选，requested / closing 是信息型（一个可点的控件都没有）', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    bootId: 'boot-a',
+    pid: 1,
+    canShutdown: true,
+    blockers: { sessions: [], jobs: 0 },
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, {})
+  const onShutdownRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-shutdown')?.handler
+  assert.equal(typeof onShutdownRequest, 'function', '宿主必须监听 request-shutdown')
+
+  // ① shutdown-confirming：确认型（原生 RiskConfirmation），勾选之前确认不可用。
+  onShutdownRequest()
+  broadcastRestartChanged(browser.listeners)
+  const confirming = renderUntilStable(overlay.component, {})
+  const confirmBox = findElement(confirming, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(confirmBox, '① 确认中：用原生 RiskConfirmation')
+  assert.equal(confirmBox.props.confirmLabel, '关闭 DSH', '① 确认按钮的文案')
+  assert.equal(confirmBox.props.disabled, false, '① 还没提交，弹窗自己不禁用')
+  assert.equal(confirmBox.props.acknowledged, false, '① ★ 勾选之前确认按钮不可用')
+  assert.equal(
+    findElement(confirming, (element) => element.type?.name === 'Modal'),
+    undefined,
+    '① 确认阶段不画信息型模态（两个模态会同时出现）',
+  )
+
+  // ② shutdown-requested：请求已经在飞 —— 信息型，没有勾选框、没有任何可点的控件。
+  restartApi().dispatch({ type: 'shutdown-submit' })
+  broadcastRestartChanged(browser.listeners)
+  const requested = renderUntilStable(overlay.component, {})
+  assert.equal(
+    findElement(requested, (element) => element.type?.name === 'RiskConfirmation'),
+    undefined,
+    '② ★ 在飞：不能再画确认框（勾选框 + 可点的按钮都是假象）',
+  )
+  const requestedModal = findElement(requested, (element) => element.type?.name === 'Modal')
+  assert.ok(requestedModal, '② 在飞：改用信息型模态（portal 到 body）')
+  assert.equal(requestedModal.props.headless, true, '② headless：连原生那个关闭按钮都不要（它会是空动作）')
+  assert.equal(requestedModal.props.open, true)
+  assert.ok(collectText(requestedModal).join('\n').includes('正在请求关闭…'), '② 复用阶段文案')
+  assert.equal(countClickables(requestedModal), 0, '② ★ 一个可点的控件都没有')
+
+  // ③ closing：202 已经回来 —— 仍然是信息型，绝不能退回「可点的关闭按钮」。
+  restartApi().dispatch({ type: 'shutdown-accepted', at: Date.now() })
+  broadcastRestartChanged(browser.listeners)
+  const closing = renderUntilStable(overlay.component, {})
+  assert.equal(
+    findElement(closing, (element) => element.type?.name === 'RiskConfirmation'),
+    undefined,
+    '③ ★ closing 里不许再出现确认按钮（真机事故就是这里退回的）',
+  )
+  const closingModal = findElement(closing, (element) => element.type?.name === 'Modal')
+  assert.ok(closingModal, '③ closing：信息型模态')
+  const text = collectText(closingModal).join('\n')
+  assert.ok(text.includes('DSH 正在关闭…'), '③ 标题复用 describeShutdownPhase 的文案')
+  assert.ok(text.includes('进程马上就要退出'), '③ 说清进程马上退出')
+  assert.ok(text.includes('页面会失去连接'), '③ 说清这个页面会失去连接')
+  assert.equal(countClickables(closingModal), 0, '③ ★ 没有可点的确认 / 取消')
+  assert.equal(
+    findElement(closingModal, (element) => element.type === 'input'),
+    undefined,
+    '③ ★ 没有勾选框',
+  )
+  // 遮罩点击与 Esc 都走 onClose：在 closing 里它必须是空动作，否则这个模态会被点掉。
+  closingModal.props.onClose()
+  assert.equal(restartApi().snapshot().phase, 'closing', '③ ★ Esc / 遮罩不能把「正在关闭」收掉')
+
+  // ④ 关不掉：回到确认型 —— 仍然是「重试 / 关闭弹窗」那一套（语义没变）。
+  //（`shutdown-request-timeout` 只在「等宿主回答」时有效，所以要重跑一遍 提交 → 超时。）
+  restartApi().reset()
+  restartApi().dispatch({ type: 'shutdown-confirm' })
+  restartApi().dispatch({ type: 'shutdown-submit' })
+  restartApi().dispatch({ type: 'shutdown-request-timeout', at: Date.now() })
+  broadcastRestartChanged(browser.listeners)
+  const failed = renderUntilStable(overlay.component, {})
+  const failedBox = findElement(failed, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(failedBox, '④ 关不掉：回到原生 RiskConfirmation')
+  assert.equal(failedBox.props.confirmLabel, '重试')
+  assert.equal(failedBox.props.cancelLabel, '关闭弹窗')
+  assert.equal(failedBox.props.disabled, undefined, '④ 走原生默认（勾选状态决定可用性）')
+  restartApi().reset()
+})
+
+test('关闭落定（closed）：模态说「实例已关闭，可以关掉这个页面」，只有一个「知道了」能收掉它', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({ ok: true, bootId: 'boot-a', pid: 1, canShutdown: true }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, {})
+  for (const event of [
+    { type: 'shutdown-confirm' },
+    { type: 'shutdown-submit' },
+    { type: 'shutdown-accepted', at: Date.now() },
+    { type: 'shutdown-elapsed' },
+  ]) {
+    restartApi().dispatch(event)
+  }
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(overlay.component, {})
+
+  const modal = findElement(tree, (element) => element.type?.name === 'Modal')
+  assert.ok(modal, '★ 落定之后模态还要在：横幅会被设置面板挡住，模态才是那个可靠的表面')
+  const text = collectText(modal).join('\n')
+  assert.ok(text.includes('实例已关闭'), '★ 标题说「实例已关闭」')
+  assert.ok(text.includes('可以关掉这个页面'), '★ 正文说「可以关掉这个页面」')
+  assert.ok(text.includes('重新启动 DSH'), '要说清要再启动得去启动器 / 终端')
+  assert.ok(text.includes('标签页'), '要给「关掉本页」的提示（而不是替用户关）')
+  const buttons = findAll(modal, (element) => element.type === 'button' || element.type?.name === 'Button')
+  assert.equal(buttons.length, 1, '★ 只给一个出口')
+  assert.equal(buttons[0].children?.[0], '知道了', '★ 是「知道了」，不是「重新加载」也不是「重试」')
+  assert.equal(typeof buttons[0].props.onClick, 'function', '它是真能点的：点了就是把模态收掉')
+
+  // 点「知道了」：只收模态，状态与横幅都不动（收掉不丢信息）。
+  buttons[0].props.onClick()
+  const dismissed = renderUntilStable(overlay.component, {})
+  assert.equal(
+    findElement(dismissed, (element) => element.type?.name === 'Modal'),
+    undefined,
+    '★ 收掉之后模态不再出现',
+  )
+  assert.equal(restartApi().snapshot().phase, 'closed', '收掉的是模态，不是状态')
+  assert.ok(findByClass(dismissed, 'dsh-agent-control-banner-card'), '★ 横幅还在页面上：收掉模态不丢信息')
+  restartApi().reset()
+})
+
+test('原生 Modal 拿不到时，信息型模态仍然退回自带的整页覆盖层（AGENTS 3.7 不回归）', async () => {
+  const originalLoader = globalThis.window.__ModuleLoader__
+  const originalExpose = globalThis.window.__dshAgentControl
+  let fallbackApply
+  globalThis.window.__ModuleLoader__ = {
+    load(spec) {
+      const exports = spec.factory((id) => {
+        if (id === 'react') return fakeReact
+        throw new Error(`拿不到模块：${id}`)
+      })
+      fallbackApply = exports.apply
+    },
+  }
+  try {
+    const url = `${pathToFileURL(path.join(process.cwd(), 'client.js')).href}?no-primitives-info`
+    await import(url)
+    assert.equal(typeof fallbackApply, 'function', '拿不到原生原语也必须加载得起来')
+    fallbackApply(makeContext())
+
+    // 推进到 closing：这个 bundle 副本有自己的模块级态机（抓手也换成了它自己的）。
+    const api = restartApi()
+    api.dispatch({ type: 'shutdown-confirm' })
+    api.dispatch({ type: 'shutdown-submit' })
+    api.dispatch({ type: 'shutdown-accepted', at: Date.now() })
+    const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+    const tree = renderComponent(overlay.component, {})
+    assert.notEqual(tree, null, '★ 拿不到原生 Modal 也必须画得出来（绝不能什么都不出现）')
+
+    const infoModal = findElement(tree, (element) => element.type?.name === 'FallbackInfoModal')
+    assert.ok(infoModal, '★ 退回自带的整页覆盖层')
+    assert.equal(infoModal.props.open, true)
+    assert.equal(
+      findElement(tree, (element) => element.type?.name === 'Modal'),
+      undefined,
+      '这条路本来就没有原生 Modal',
+    )
+    assert.ok(collectText(infoModal).join('\n').includes('DSH 正在关闭…'), '内容照旧（复用同一套内容块）')
+    assert.equal(countClickables(infoModal), 0, '★ 兜底里也不给按钮')
+
+    // 兜底控件自己的契约：只说话；按钮一律由调用方作为 children 传进来。
+    const { FallbackInfoModal } = globalThis.window.__dshAgentControl.fallbacks
+    assert.equal(typeof FallbackInfoModal, 'function')
+    assert.equal(FallbackInfoModal({ open: false }), null, '关着的时候什么都不渲染')
+    const manual = FallbackInfoModal({
+      open: true,
+      title: '实例已关闭，可以关掉这个页面',
+      children: [fakeReact.createElement('p', { key: 'x' }, '实例已关闭，可以关掉这个页面')],
+    })
+    assert.equal(manual.props.role, 'dialog')
+    assert.equal(manual.props['aria-modal'], 'true')
+    assert.ok(collectText(manual).join('\n').includes('实例已关闭'))
+    assert.equal(countClickables(manual), 0, '★ 兜底卡片不会凭空多出一个关闭按钮')
+  } finally {
+    globalThis.window.__ModuleLoader__ = originalLoader
+    globalThis.window.__dshAgentControl = originalExpose
+  }
 })
 

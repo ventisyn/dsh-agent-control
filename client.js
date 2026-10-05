@@ -211,6 +211,17 @@
   const BANNER_CARD_CLASS = 'dsh-agent-control-banner-card'
   const BANNER_TITLE_CLASS = 'dsh-agent-control-banner-title'
   const BANNER_DETAIL_CLASS = 'dsh-agent-control-banner-detail'
+  /**
+   * 信息型模态（关闭流程的「正在关闭 / 已关闭」）的内容块。
+   *
+   * 原生 `Modal` 走 `headless`（见 `renderShutdownInfo`），头 / 正文 / 页脚的内边距
+   * 因此要自己给；度量逐条抄已装原生的 `Modal.module.css`，颜色一律走 token。
+   */
+  const INFO_CONTENT_CLASS = 'dsh-agent-control-modal-content'
+  const INFO_HEAD_CLASS = 'dsh-agent-control-modal-head'
+  const INFO_TITLE_CLASS = 'dsh-agent-control-modal-title'
+  const INFO_BODY_CLASS = 'dsh-agent-control-modal-body'
+  const INFO_FOOTER_CLASS = 'dsh-agent-control-modal-footer'
   const STYLE_CSS = [
     `.${ACTION_CLASS}{display:inline-flex;align-items:center;justify-content:center;flex:none;`
       + 'box-sizing:border-box;width:calc(28px + var(--dsh-content-font-delta,0px));'
@@ -294,6 +305,18 @@
       + 'color:var(--dsw-alias-label-primary)}',
     `.${BANNER_TITLE_CLASS}{font-weight:500}`,
     `.${BANNER_DETAIL_CLASS}{color:var(--dsw-alias-label-secondary);font-variant-numeric:tabular-nums}`,
+    // 信息型模态的内容块。度量逐条抄 Modal.module.css：.content（flex column）、
+    // .header（22 14 12 24，本插件没有关闭按钮，右边不留 14）、.title（16/24 500）、
+    // .description（14/22）、.footer（右对齐、gap 8、左右 24）。卡片自己的
+    // `padding:0 0 24px` 与 `gap:20px` 由原生 Modal 负责，这里不重复。
+    `.${INFO_CONTENT_CLASS}{display:flex;flex-direction:column;width:100%}`,
+    `.${INFO_HEAD_CLASS}{padding:22px 24px 12px}`,
+    `.${INFO_TITLE_CLASS}{margin:0;font-size:16px;line-height:24px;font-weight:500;`
+      + 'color:var(--dsw-alias-label-primary)}',
+    `.${INFO_BODY_CLASS}{display:flex;flex-direction:column;gap:8px;padding:0 24px;`
+      + 'font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}',
+    `.${INFO_FOOTER_CLASS}{display:flex;align-items:center;justify-content:flex-end;gap:8px;`
+      + 'padding:0 24px}',
   ].join('')
 
   /** 注入一次样式表；没有 document（离线测试）或已注入时什么都不做。 */
@@ -381,6 +404,25 @@
   }
 
   /**
+   * 原生 `Modal` 拿不到时的**信息型**模态（只说话，不给按钮）。
+   *
+   * 它保留的唯一契约是「盖住整页」：关闭流程里这个模态是页面唯一一定盖得住设置面板的
+   * 表面（横幅会被设置面板挡住），拿不到原生原语也不能退化成页脚里一行没人看见的字。
+   * 按钮一律由调用方作为 children 传进来（只有 `closed` 的「知道了」），所以这里不会
+   * 凭空多出关闭 / 取消按钮——那正是真机上「看着能点、其实什么也不会发生」的来源。
+   */
+  function FallbackInfoModal(props) {
+    if (props?.open !== true) return null
+    const items = (Array.isArray(props?.children) ? props.children : [props?.children])
+      .filter((child) => child !== null && child !== undefined)
+    return React.createElement(
+      'div',
+      { style: FALLBACK_OVERLAY_STYLE, role: 'dialog', 'aria-modal': 'true', 'aria-label': props.title },
+      React.createElement('div', { style: FALLBACK_INFO_CARD_STYLE }, ...items),
+    )
+  }
+
+  /**
    * 原生 `RiskConfirmation` 拿不到时的替代确认框。
    *
    * 保留最要紧的那条契约：**确认按钮在勾选之前不可用**。它不是原生控件的替代品
@@ -455,6 +497,14 @@
   const FALLBACK_FOOTER_STYLE = { display: 'flex', justifyContent: 'flex-end', gap: 8 }
   const FALLBACK_CANCEL_STYLE = { padding: '6px 14px', borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))', background: 'transparent', color: 'inherit', cursor: 'pointer' }
   const FALLBACK_CONFIRM_STYLE = { padding: '6px 14px', borderRadius: 8, border: 'none', background: 'var(--dsw-alias-state-error-primary, #e5484d)', color: '#fff', cursor: 'pointer' }
+  /**
+   * 信息型兜底卡片的度量。
+   *
+   * 横向内边距与底部留白交给卡片里的内容块自己给（它们抄的是原生 `Modal.module.css`），
+   * 所以卡片本身只在**拿不到原生 Modal** 这条路上补一层壳：上下留白与圆角，
+   * 内边距归零，避免和内容块自己的 22/24 内边距叠成双份。
+   */
+  const FALLBACK_INFO_CARD_STYLE = { ...FALLBACK_CARD_STYLE, padding: '0 0 20px' }
 
   const zh = {
     'menu.deleteSession': '删除会话…',
@@ -568,11 +618,14 @@
     'shutdown.dialog.body': '会停止整个 DSH 进程：正在运行的任务、会话以及它们的后台任务都会被中断。关闭之后不会自动重启，要再启动得去启动器或终端。实例被启动器失去跟踪时（例如热重启之后），这是唯一的收尾入口。',
     'shutdown.dialog.ack': '我明白关闭实例会中断正在运行的任务，而且不会自动重启',
     'shutdown.dialog.confirm': '关闭 DSH',
-    'shutdown.dialog.working': '正在关闭…',
     'shutdown.dialog.failedTitle': '没能关掉这个实例',
     'shutdown.dialog.failedBody': '关闭请求没有成功，实例多半还在运行。可以重试，也可以先关掉这个弹窗。',
     'shutdown.dialog.retry': '重试',
     'shutdown.dialog.close': '关闭弹窗',
+    // 信息型模态（请求已经交出去，界面上没有可做的决定）：只说清「现在是哪一步」。
+    'shutdown.info.requestedBody': '正在把关闭请求交给宿主，等它接受。',
+    'shutdown.info.closingBody': '进程马上就要退出，这个页面会失去连接，之后不会再收到它的状态。',
+    'shutdown.info.dismiss': '知道了',
     'shutdown.blockers': '下面这些会被一起中断',
     'error.SHUTDOWN_DENIED': '这次关闭被拒绝了',
     'error.SHUTDOWN_UNSUPPORTED': '这个部署关不掉实例：宿主没有提供退出进程的能力（appExit）',
@@ -694,11 +747,14 @@
     'shutdown.dialog.body': 'This stops the whole DSH process: running tasks, sessions, and their background jobs are all interrupted. It does not restart on its own — start it again from the launcher or a terminal. When the launcher has lost track of this instance (after a hot restart, for example), this is the only way to close it down.',
     'shutdown.dialog.ack': 'I understand a shutdown interrupts running tasks and does not restart on its own',
     'shutdown.dialog.confirm': 'Shut down DSH',
-    'shutdown.dialog.working': 'Shutting down…',
     'shutdown.dialog.failedTitle': 'The instance could not be closed',
     'shutdown.dialog.failedBody': 'The shutdown request did not succeed, so the instance is most likely still running. You can retry, or close this dialog for now.',
     'shutdown.dialog.retry': 'Retry',
     'shutdown.dialog.close': 'Close dialog',
+    // Informational modal (the request is already out; there is nothing left to decide).
+    'shutdown.info.requestedBody': 'Handing the shutdown request to the host and waiting for it to accept.',
+    'shutdown.info.closingBody': 'The process is about to exit; this page will lose its connection and will not hear from it again.',
+    'shutdown.info.dismiss': 'Got it',
     'shutdown.blockers': 'These will be interrupted as well',
     'error.SHUTDOWN_DENIED': 'This shutdown was refused',
     'error.SHUTDOWN_UNSUPPORTED': 'This deployment cannot be shut down: the host provides no way to exit the process (appExit)',
@@ -712,6 +768,13 @@
   let React
   let IconTrashOutlineRegular
   let RiskConfirmation
+  /**
+   * 原生模态外壳（portal 到 body）；拿不到时为 undefined，退回 `FallbackInfoModal`。
+   *
+   * 关闭流程的**信息型**模态用它，因为它是这个页面上唯一一定盖得住设置面板的表面
+   * （见 `renderShutdownInfo`）。
+   */
+  let Modal
   /** 原生菜单行 / 气泡提示；拿不到时为 undefined，组件退回自带样式。 */
   let MenuItemButton
   let Tooltip
@@ -1937,6 +2000,13 @@
       const [error, setError] = useState(null)
       const [restartAcknowledged, setRestartAcknowledged] = useState(false)
       const [shutdownAcknowledged, setShutdownAcknowledged] = useState(false)
+      /**
+       * `closed` 的信息型模态被「知道了」收掉了吗。
+       *
+       * ⚠️ 只收**模态**，不改阶段：横幅（以及设置页那一行）继续说明「实例已关闭，可以关掉
+       * 这个页面」。收掉不丢信息，是这个状态唯一的用途。
+       */
+      const [shutdownInfoDismissed, setShutdownInfoDismissed] = useState(false)
       const restart = useRestartState()
       const status = restart.status
 
@@ -1957,6 +2027,8 @@
         const onShutdownRequest = () => {
           // 同上：每次重新问一遍勾选；被拒或「关不掉」之后阶段还在关闭流程里，原因看得见。
           setShutdownAcknowledged(false)
+          // 新的一次关闭：上一轮收掉的「知道了」不能在这一次里继续生效。
+          setShutdownInfoDismissed(false)
           dispatchRestart({ type: 'shutdown-confirm' })
         }
         window.addEventListener(REQUEST_EVENT, onRequest)
@@ -2115,18 +2187,21 @@
       }
 
       /**
-       * 关闭确认（复用同一个宿主、同一个原生 `RiskConfirmation`）。
+       * 关闭流程的弹窗（同一个宿主、同一份状态）。按「这一刻还需要用户做决定吗」分两种呈现：
        *
-       * 三种形态：
-       *  · `shutdown-confirming` —— 正文 + 阻塞项 + （被拒时的）宿主原因，勾选后才能确认；
-       *  · `shutdown-requested` —— 请求在飞：显示进度并禁用，不允许重复提交、也不允许取消；
-       *  · `shutdown-failed`    —— 关不掉（超时 / 网络错误）：给「重试」与「关闭弹窗」，不无限转圈。
+       *  · **确认型**（`shutdown-confirming` / `shutdown-failed`）：要勾选、要决定重试，
+       *    用原生 `RiskConfirmation`（勾选之前确认不可用）；
+       *  · **信息型**（`shutdown-requested` / `closing` / `closed`）：请求已经交出去，
+       *    没有任何可做的决定，用原生 `Modal`（`headless`，portal 到 body）**只说话、不给按钮**。
+       *
+       * ⚠️ 这段注释记的是一次真机事故：早先这三个阶段共用 `RiskConfirmation`，于是 202 一到
+       * （阶段切到 `closing`）弹窗**退回普通确认框的样子**——勾选框还在、「关闭 DSH」又变得可点，
+       * 而真正说明「正在关闭」的文案只出现在被这个模态挡住的设置页与横幅里。用户看到的就成了
+       * 「点了没反应、然后页面死了」，连一张「正在关闭」的截图都截不到。
+       * 这个模态是 portal 到 body 的，是整个页面上**唯一一定盖得住设置面板**的表面，
+       * 所以它必须自己把状态说清楚。
        */
-      const renderShutdownConfirm = () => {
-        const phase = restart.phase
-        if (!isShutdownPhase(phase)) return null
-        const submitting = phase === 'shutdown-requested'
-
+      const renderShutdownConfirm = (phase) => {
         if (phase === 'shutdown-failed') {
           const failedLines = [t('shutdown.dialog.failedBody')]
           if (restart.shutdownError !== null) failedLines.push(`⚠ ${describeShutdownError(restart.shutdownError)}`)
@@ -2157,14 +2232,96 @@
           acknowledgeLabel: t('shutdown.dialog.ack'),
           cancelLabel: t('dialog.cancel'),
           closeLabel: t('dialog.close'),
-          confirmLabel: submitting ? t('shutdown.dialog.working') : t('shutdown.dialog.confirm'),
+          confirmLabel: t('shutdown.dialog.confirm'),
           acknowledged: shutdownAcknowledged,
-          disabled: submitting,
+          // 确认阶段本来就不在提交中（提交中已经换成信息型模态了），这里显式写明，
+          // 免得以后有人把 `submitting` 又接回这个分支。
+          disabled: false,
           onAcknowledgedChange: setShutdownAcknowledged,
-          // 提交中不允许取消（态机里也拦一次，两道门）。
           onCancel: () => { dispatchRestart({ type: 'shutdown-cancel' }) },
           onConfirm: () => { void submitShutdown() },
         })
+      }
+
+      /**
+       * 信息型模态：请求已经交出去，界面上**没有可做的决定**。
+       *
+       * 因此一个按钮都不给（`closing` 里连遮罩点击与 Esc 都不收掉它）：这个模态存在的理由
+       * 就是「它是唯一盖得住设置面板的反馈」，任何看起来能点、实际什么也不会发生的控件
+       * 都会把用户带回「点了没反应」的观感里。
+       *
+       * 阶段文案直接复用 `describeShutdownPhase`（不另写一套词）；`closed` 用横幅那两句
+       * 已有的文案，并允许一个真实的「知道了」把模态收掉——收掉之后横幅还在页面上。
+       *
+       * @param {string} phase `shutdown-requested` / `closing` / `closed`。
+       * @returns {object|null} 元素树；`closed` 已被收掉时返回 null。
+       */
+      const renderShutdownInfo = (phase) => {
+        const closed = phase === 'closed'
+        if (closed && shutdownInfoDismissed) return null
+        const title = closed ? t('shutdown.banner.closedTitle') : describeShutdownPhase(restart, t)
+        const lines = closed
+          ? [t('shutdown.banner.closedDetail'), t('shutdown.banner.closedHint')]
+          : [phase === 'closing' ? t('shutdown.info.closingBody') : t('shutdown.info.requestedBody')]
+        const content = react.createElement(
+          'div',
+          { className: INFO_CONTENT_CLASS, key: 'content' },
+          react.createElement(
+            'div',
+            { className: INFO_HEAD_CLASS },
+            react.createElement('h2', { className: INFO_TITLE_CLASS }, title),
+          ),
+          react.createElement(
+            'div',
+            { className: INFO_BODY_CLASS },
+            ...lines.map((line, index) => react.createElement('p', { key: index, style: { margin: 0 } }, line)),
+          ),
+        )
+        const footer = closed
+          ? react.createElement(
+            'div',
+            { className: INFO_FOOTER_CLASS, key: 'footer' },
+            renderButton({
+              key: 'acknowledge',
+              variant: 'outline',
+              onClick: () => setShutdownInfoDismissed(true),
+              children: t('shutdown.info.dismiss'),
+            }),
+          )
+          : null
+        // `closed` 的「知道了」与 `onClose` 是同一件事（遮罩点击 / Esc 也走它）；
+        // 其余阶段给一个空函数：`Modal` 要求 `onClose` 必须是函数，而这里确实不该被收掉。
+        const dismiss = closed ? () => setShutdownInfoDismissed(true) : () => {}
+        return react.createElement(
+          Modal ?? FallbackInfoModal,
+          {
+            open: true,
+            key: 'shutdown-info',
+            onClose: dismiss,
+            // headless 下 title 只当无障碍名（模态里那个 h2 才是可见标题）；closeLabel 同理由
+            // 于没有关闭按钮而只作为备用标签。
+            title,
+            closeLabel: t('shutdown.info.dismiss'),
+            headless: true,
+          },
+          content,
+          footer,
+        )
+      }
+
+      /**
+       * 关闭流程该画哪个弹窗（唯一定义「哪几个阶段画哪种」的地方）。
+       *
+       * `submitting` = **任何在飞的关闭阶段**（`shutdown-requested` 与 `closing`）：
+       * 一旦请求交出去就不再给可点的确认 / 取消，避免真机上那种「看着能点、其实无效」的假象。
+       */
+      const renderShutdownDialog = () => {
+        const phase = restart.phase
+        if (!isShutdownPhase(phase)) return null
+        const submitting = phase === 'shutdown-requested' || phase === 'closing'
+        return submitting || phase === 'closed'
+          ? renderShutdownInfo(phase)
+          : renderShutdownConfirm(phase)
       }
 
       /**
@@ -2198,18 +2355,18 @@
       const banner = renderRestartBanner()
       const shutdownBanner = renderShutdownBanner()
       const restartConfirm = renderRestartConfirm()
-      const shutdownConfirm = renderShutdownConfirm()
+      const shutdownDialog = renderShutdownDialog()
       const deleteConfirm = renderDeleteConfirm()
       // 什么都没有时返回 null：槽位在「没事发生」时不该往页面上放节点。
       if (banner === null && shutdownBanner === null && restartConfirm === null
-        && shutdownConfirm === null && deleteConfirm === null) return null
+        && shutdownDialog === null && deleteConfirm === null) return null
       return react.createElement(
         react.Fragment,
         null,
         banner,
         shutdownBanner,
         restartConfirm,
-        shutdownConfirm,
+        shutdownDialog,
         deleteConfirm,
       )
     }
@@ -2633,6 +2790,9 @@
       RiskConfirmation = typeof primitives?.RiskConfirmation === 'function'
         ? primitives.RiskConfirmation
         : FallbackRiskConfirmation
+      // 信息型模态的外壳：拿不到就退回自带的整页覆盖层（关闭流程里它是唯一还在说话的
+      // 地方，绝不能因为拿不到原语就退化成看不见的一行字）。
+      Modal = typeof primitives?.Modal === 'function' ? primitives.Modal : undefined
       MenuItemButton = typeof primitives?.MenuItemButton === 'function' ? primitives.MenuItemButton : undefined
       Tooltip = typeof primitives?.Tooltip === 'function' ? primitives.Tooltip : undefined
       // 原生 `Button` 拿不到就退回自带按钮（度量照抄，功能不丢）；图标同理。
@@ -2650,7 +2810,7 @@
   window.__dshAgentControl = {
     id: PLUGIN_ID,
     apply,
-    fallbacks: { FallbackTrashIcon, FallbackRiskConfirmation, FallbackButton, FallbackRefreshIcon },
+    fallbacks: { FallbackTrashIcon, FallbackRiskConfirmation, FallbackInfoModal, FallbackButton, FallbackRefreshIcon },
     syncTurnRows,
     usingNativePrimitives: () => RiskConfirmation === undefined
       ? null
