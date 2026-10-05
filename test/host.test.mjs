@@ -16,6 +16,7 @@ import { ERROR_CODES, PATHS, statusForCode } from '../src/shared.mjs'
 import { PENDING_MAX_AGE_MS, readLast, readPending, restartDir, writeLast, writePending } from '../src/restart.mjs'
 import {
   RESTART_TOOL_NAME,
+  SHUTDOWN_EXIT_DELAY_MS,
   checkRestartTrust,
   createRestartState,
   deliverResumes,
@@ -24,6 +25,7 @@ import {
   preflightRestart,
   registerRestartTool,
   requestRestart,
+  requestShutdown,
   resetRestartRuntimeForTest,
   resolveApprovalMode,
 } from '../src/restart-tool.mjs'
@@ -74,11 +76,13 @@ function makeHost(services = {}, options = {}) {
 
 /**
  * 带「假副作用」的 host：`schedule` 只把后台时序排进队列（测试自己决定什么时候驱动它），
- * `spawn` / `appExit` 一律是假的——**测试绝不真的派生辅助进程、绝不真的退出进程**。
+ * `spawn` / `appExit` 一律是假的——**测试绝不真的派生辅助进程、绝不真的退出进程**；
+ * `deferExit`（关闭实例时「先回响应、再退出」的那一拍）同样排进队列。
  */
 function makeRestartHost(services = {}, options = {}) {
   const background = []
   const exits = []
+  const deferred = []
   const host = makeHost(services, {
     config: options.config,
     host: {
@@ -91,10 +95,30 @@ function makeRestartHost(services = {}, options = {}) {
       appExit: (code) => {
         exits.push(code)
       },
+      deferExit: (fn) => {
+        deferred.push(fn)
+      },
       ...(options.host ?? {}),
     },
   })
-  return { ...host, background, exits }
+  return { ...host, background, exits, deferred }
+}
+
+/** 驱动关闭实例的「延迟退出」（生产实现是响应之后 300 ms 的 setTimeout）。 */
+function runDeferredExit(host) {
+  const task = host.deferred.shift()
+  assert.equal(typeof task, 'function', '关闭必须先安排好一个延迟退出')
+  task()
+}
+
+/** 等一个条件成立（最多 ms 毫秒），返回最后是否成立。用于等真实的定时器。 */
+async function waitFor(predicate, ms = 2000) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return predicate()
 }
 
 /** 直接驱动 `requestRestart` 时用的 deps（副作用全部是假的）。 */
@@ -775,4 +799,269 @@ test('启动参数重放：--port 0（OS 随机端口）时把真实端口原地
   const deps = makeRestartDeps(ctx, { dshHome: os.tmpdir(), argv: ['/x/bin.js', '--port', '0'] })
   assert.deepEqual(deps.argvForReplay, ['/x/bin.js', '--port', '3080', '--no-open'], '钉住端口 + 补 --no-open')
   assert.equal(deps.statusUrl, 'http://127.0.0.1:3080/api/agent-control/restart/status')
+})
+
+// ---------------------------------------------------------------------------
+// 关闭实例（只有界面入口）：可信校验、单飞、先回 202 再退出的顺序、失败不假装
+// ---------------------------------------------------------------------------
+
+test('关闭错误码到 HTTP 状态的映射：403 / 501 / 500；旧码语义不动', () => {
+  assert.equal(PATHS.shutdown, '/api/agent-control/shutdown', '路径是与 client 的契约（浏览器侧有一份常量副本）')
+  assert.equal(statusForCode(ERROR_CODES.shutdownDenied), 403, '请求不可信')
+  assert.equal(statusForCode(ERROR_CODES.shutdownUnsupported), 501, '这个部署没有 appExit，做不到')
+  assert.equal(statusForCode(ERROR_CODES.shutdownFailed), 500, '请求宿主退出时抛错')
+  // 三者对用户的下一步完全不同（换个浏览器重试 / 从终端停 / 再点一次），绝不能合并成一个码。
+  assert.equal(
+    new Set([ERROR_CODES.shutdownDenied, ERROR_CODES.shutdownUnsupported, ERROR_CODES.shutdownFailed]).size,
+    3,
+  )
+  // 旧的删除类与重启类码一个都不许动。
+  assert.equal(statusForCode(ERROR_CODES.restartDenied), 403)
+  assert.equal(statusForCode(ERROR_CODES.restartForbidden), 403)
+  assert.equal(statusForCode(ERROR_CODES.restartInProgress), 409)
+  assert.equal(statusForCode(ERROR_CODES.restartUnsupported), 501)
+  assert.equal(statusForCode(ERROR_CODES.deleteFailed), 500)
+  assert.equal(statusForCode(ERROR_CODES.sessionLive), 409)
+  assert.equal(statusForCode(ERROR_CODES.agentBusy), 423)
+  // 延迟退出的量级：太短会把 202 掐断（closeAllConnections），太长会让界面觉得「关不掉」。
+  assert.equal(SHUTDOWN_EXIT_DELAY_MS >= 300 && SHUTDOWN_EXIT_DELAY_MS <= 500, true, `实际是 ${SHUTDOWN_EXIT_DELAY_MS} ms`)
+})
+
+test('POST /shutdown：请求头不可信 ⇒ 403 SHUTDOWN_DENIED；content-type 不是 JSON ⇒ 400；都不安排退出', async (t) => {
+  tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost()
+
+  const noOrigin = await call(host, PATHS.shutdown, { body: '{}', headers: { origin: undefined } })
+  assert.equal(noOrigin.status, 403)
+  assert.equal(noOrigin.body.error.code, ERROR_CODES.shutdownDenied)
+
+  const wrongOrigin = await call(host, PATHS.shutdown, { body: '{}', headers: { origin: 'http://evil.example' } })
+  assert.equal(wrongOrigin.status, 403)
+  assert.equal(wrongOrigin.body.error.code, ERROR_CODES.shutdownDenied)
+
+  const wrongType = await call(host, PATHS.shutdown, { body: '{}', headers: { 'content-type': 'text/plain' } })
+  assert.equal(wrongType.status, 400)
+  assert.equal(wrongType.body.error.code, ERROR_CODES.invalidRequest)
+
+  // 宿主愿意替我们判一次就用它的结论（与 /restart 同一条口径）。
+  const unauthorized = makeRestartHost({ connection: { requestRejection: () => 401 } })
+  const copied = await call(unauthorized, PATHS.shutdown, { body: '{}' })
+  assert.equal(copied.status, 401)
+  assert.equal(copied.body.error.code, ERROR_CODES.shutdownDenied)
+
+  assert.equal(host.deferred.length, 0, '★ 被拒绝的请求绝不能安排退出')
+  assert.deepEqual(host.exits, [], '★ 更不能真的退出进程')
+})
+
+test('POST /shutdown：空体与 {} 都接受 ⇒ 202；先回响应再退出，appExit 恰好一次且参数是 0', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost()
+
+  // 空体：「关掉这个实例」不需要参数。
+  const empty = await call(host, PATHS.shutdown, { body: '' })
+  assert.equal(empty.status, 202)
+  assert.deepEqual(empty.body, { ok: true })
+  assert.equal(host.deferred.length, 1, '响应之后才安排退出')
+  assert.deepEqual(host.exits, [], '★ 响应发出之前 appExit 一次都不许调（先退出会把这条 202 掐断，界面显示成「关不掉」）')
+  assert.equal(host.background.length, 0, '关闭没有后台时序：不等空闲、不起辅助进程、不投递续作')
+  assert.equal(readPending(restartDir(home)), undefined, '关闭不写任何热重启待办')
+  assert.equal(host.warnings.some((line) => /关闭实例/.test(line)), true, '日志要留痕')
+
+  runDeferredExit(host)
+  assert.deepEqual(host.exits, [0], '★ 恰好一次，且退出码是 0')
+
+  // `{}` 也必须接受（界面可能带一个空的 JSON 体）。
+  resetRestartRuntimeForTest()
+  const jsonHost = makeRestartHost()
+  const withBody = await call(jsonHost, PATHS.shutdown, { body: '{}' })
+  assert.equal(withBody.status, 202)
+  runDeferredExit(jsonHost)
+  assert.deepEqual(jsonHost.exits, [0])
+})
+
+test('POST /shutdown：宿主没有 appExit ⇒ 501 SHUTDOWN_UNSUPPORTED，不安排退出也不标记关闭中', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  // 不注入 appExit，也不给 ctx 提供 appExit 服务。
+  const host = makeRestartHost({}, { host: { appExit: undefined } })
+
+  const response = await call(host, PATHS.shutdown, { body: '{}' })
+
+  assert.equal(response.status, 501)
+  assert.equal(response.body.error.code, ERROR_CODES.shutdownUnsupported)
+  assert.match(response.body.error.message, /appExit/)
+  assert.equal(host.deferred.length, 0, '★ 做不到就不能安排退出')
+  assert.deepEqual(host.exits, [])
+
+  // 被拒绝不许留下「正在关闭」的状态：紧接着的一次热重启必须还能安排（标志若置上了这里会是 409）。
+  const restartHost = makeRestartHost()
+  const scheduled = await call(restartHost, PATHS.restart, { body: JSON.stringify({ reason: '装插件' }) })
+  assert.equal(scheduled.status, 202, '★ 501 拒绝之后不能把实例标成「正在关闭」')
+})
+
+test('POST /shutdown：已经有一次热重启在飞 ⇒ 409 RESTART_IN_PROGRESS，且不安排退出', async (t) => {
+  tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost()
+
+  const scheduled = await call(host, PATHS.restart, { body: JSON.stringify({ reason: '装插件' }) })
+  assert.equal(scheduled.status, 202)
+  assert.equal(host.background.length, 1, '热重启的时序还排在队列里 = 这次重启还在飞')
+
+  const response = await call(host, PATHS.shutdown, { body: '{}' })
+
+  assert.equal(response.status, 409)
+  assert.equal(response.body.error.code, ERROR_CODES.restartInProgress)
+  assert.match(response.body.error.message, /热重启在进行中/)
+  assert.equal(host.deferred.length, 0, '★ 被单飞挡下时绝不能安排退出')
+  assert.deepEqual(host.exits, [])
+})
+
+test('关闭进行中的第二次 POST /shutdown ⇒ 409 RESTART_IN_PROGRESS，且不再安排第二次退出', async (t) => {
+  tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost()
+
+  const first = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(first.status, 202)
+  assert.equal(host.deferred.length, 1, '第一次已经安排好退出（还没执行）')
+
+  // 300 ms 的响应窗口里用户又点了一次（或客户端重试）：这是**同一次**关闭，不该排第二次退出。
+  const second = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(second.status, 409)
+  assert.equal(second.body.error.code, ERROR_CODES.restartInProgress)
+  assert.match(second.body.error.message, /正在关闭/)
+  assert.equal(host.deferred.length, 1, '★ 不许再安排第二次退出')
+  assert.deepEqual(host.exits, [], '退出还没执行：它在响应之后那一拍')
+
+  runDeferredExit(host)
+  assert.deepEqual(host.exits, [0], '★ 整个关闭过程恰好退出一次')
+})
+
+test('关闭进行中时再发起的重启 ⇒ 409 RESTART_IN_PROGRESS（反向单飞）；测试重置后又能安排', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost()
+
+  const shutdown = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(shutdown.status, 202)
+
+  const restart = await call(host, PATHS.restart, { body: JSON.stringify({ reason: '关之前再重启一次' }) })
+  assert.equal(restart.status, 409)
+  assert.equal(restart.body.error.code, ERROR_CODES.restartInProgress)
+  assert.match(restart.body.error.message, /正在关闭/, '文案要说清是「实例正在关闭」')
+  assert.equal(readPending(restartDir(home)), undefined, '★ 被挡下的重启不许留下待办')
+
+  // 重置函数必须把 shuttingDown 一起清掉，否则同一个进程里后续用例会集体被「实例正在关闭」挡住。
+  resetRestartRuntimeForTest()
+  const after = await call(host, PATHS.restart, { body: JSON.stringify({ reason: '清掉标志之后再重启' }) })
+  assert.equal(after.status, 202)
+})
+
+test('requestShutdown 的退出动作抛错 ⇒ SHUTDOWN_FAILED（500）并复原状态，可以再试一次', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  let calls = 0
+  const { ctx } = makeToolContext()
+  const deps = makeRestartDeps(ctx, {
+    dshHome: home,
+    appExit: () => {
+      calls += 1
+      throw new Error('宿主拒绝退出')
+    },
+  })
+
+  const shutdown = await requestShutdown(ctx, deps)
+  assert.equal(shutdown.ok, true)
+  assert.equal(typeof shutdown.exit, 'function')
+  assert.equal(calls, 0, '★ requestShutdown 自己不许调 appExit：响应还没发出去')
+
+  assert.throws(
+    () => shutdown.exit(),
+    (error) => error.code === ERROR_CODES.shutdownFailed
+      && error.status === 500
+      && /宿主拒绝退出/.test(error.message),
+    '★ 退出抛错必须如实报 SHUTDOWN_FAILED，绝不假装已经关掉',
+  )
+  assert.equal(calls, 1)
+
+  // 复原：紧接着的热重启不该被「实例正在关闭」挡成 409。
+  const result = await requestRestart(ctx, deps, { source: 'ui', sessionId: 's1', reason: '复原之后再重启' })
+  assert.equal(typeof result.restartId, 'string')
+})
+
+test('路由层退出失败：202 已经发出去了，只能如实记错误日志；标记复原后可以再点一次', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const calls = []
+  const host = makeRestartHost({}, {
+    host: {
+      appExit: (code) => {
+        calls.push(code)
+        if (calls.length === 1) throw new Error('宿主拒绝退出')
+      },
+    },
+  })
+
+  const accepted = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(accepted.status, 202)
+  assert.deepEqual(calls, [], '响应之前不调 appExit')
+
+  runDeferredExit(host)
+  assert.deepEqual(calls, [0], '退出动作被调用时传 0')
+  assert.equal(host.errors.length, 1, '★ 退出抛错必须留一条 error 日志，绝不假装关掉了')
+  assert.match(host.errors[0], /宿主拒绝退出/, '原始信息要原样带出来')
+
+  // exit 复原了标记：再点一次会被接受，并且真的再请求一次退出（否则这个实例再也关不掉了）。
+  const again = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(again.status, 202)
+  runDeferredExit(host)
+  assert.deepEqual(calls, [0, 0])
+})
+
+test('GET /restart/status：canShutdown 是布尔，只反映 appExit 是否可用，不看阻塞项', async (t) => {
+  tempHome(t)
+  resetRestartRuntimeForTest()
+  const withExit = await call(makeRestartHost(), PATHS.restartStatus, { method: 'GET' })
+  const withoutExit = await call(makeRestartHost({}, { host: { appExit: undefined } }), PATHS.restartStatus, { method: 'GET' })
+
+  assert.equal(typeof withExit.body.canShutdown, 'boolean', '形状固定是布尔，界面直接绑按钮的禁用态')
+  assert.equal(withExit.body.canShutdown, true)
+  assert.equal(typeof withoutExit.body.canShutdown, 'boolean')
+  assert.equal(withoutExit.body.canShutdown, false)
+  assert.match(withoutExit.body.unsupportedReason, /appExit/, '同一个原因要能在状态里读到')
+
+  // 关闭与重启是两件事：有会话在跑时重启要提示会打断谁，而 canShutdown 不受影响
+  // ——关掉实例本来就会让它们一起停，界面不该因为「有会话在跑」就把关闭按钮禁掉。
+  const busy = makeRestartHost({ agents: { list: () => [{ id: 'session-a', status: 'running' }] } })
+  const busyStatus = await call(busy, PATHS.restartStatus, { method: 'GET' })
+  assert.deepEqual(busyStatus.body.blockers.sessions.map((row) => row.sessionId), ['session-a'])
+  assert.equal(busyStatus.body.canShutdown, true)
+})
+
+test('生产配置下的延迟退出：不注入 deferExit 时走真实的 300 ms 定时器，响应之后才退出', async (t) => {
+  tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const exits = []
+  // 这个 host **不注入任何副作用**：appExit 来自 ctx 服务，deferExit 是 createRestartState 的缺省实现
+  // （真实的 setTimeout）。其余用例注入队列是为了快，这一条专门盯「生产路径真的会延迟退出」。
+  const host = makeHost({ appExit: (code) => { exits.push(code) } })
+
+  const response = await call(host, PATHS.shutdown, { body: '{}' })
+
+  assert.equal(response.status, 202)
+  assert.deepEqual(exits, [], '★ 响应发出之前不许退出（先退出会把这条 202 掐断）')
+  assert.equal(await waitFor(() => exits.length > 0), true, '延迟那一拍必须真的触发退出')
+  assert.deepEqual(exits, [0], '退出码是 0，且只退出一次')
 })

@@ -20,6 +20,10 @@ export const PATHS = {
   // 辅助进程靠它判断新进程是否已经起来了。
   restartStatus: `${API_PREFIX}/restart/status`,
   restart: `${API_PREFIX}/restart`,
+  // 关闭实例。**刻意没有对应的模型工具**：关掉实例会让所有会话一起死、而且不会自动恢复，
+  // 这类操作只从界面触发（AGENTS.md 第 6 节）。它与热重启是两件事：关闭就是让进程退出，
+  // 没有辅助进程、没有新进程、没有续作投递。
+  shutdown: `${API_PREFIX}/shutdown`,
   // 模型可见的工具名。client 侧也有一份同名常量（浏览器 bundle 与 host 模块不共享模块图），
   // 两边的值必须一致。
   restartToolName: 'restart_harness',
@@ -48,6 +52,11 @@ export const ERROR_CODES = {
   // 子代理调用重启工具。与 RESTART_DENIED 分开：前者是「你不该发起这件事」（换谁来都没用），
   // 后者是「这次没被批准」（换一次审批可能就过了）。计划 3.1 要求子代理拒绝，3.2 的表漏了这一行。
   restartForbidden: 'RESTART_FORBIDDEN',
+  // 关闭实例。与热重启的码分开：处置方式完全不同（请求不可信 / 这个部署没有 appExit /
+  // 宿主退出时真的抛错了），合并进 RESTART_* 会让界面把「关不掉」说成「重启失败了」。
+  shutdownDenied: 'SHUTDOWN_DENIED',
+  shutdownUnsupported: 'SHUTDOWN_UNSUPPORTED',
+  shutdownFailed: 'SHUTDOWN_FAILED',
 }
 
 /** 带错误码的失败。路由层按码决定 HTTP 状态。 */
@@ -92,6 +101,11 @@ export function statusForCode(code) {
     case ERROR_CODES.restartInProgress: return 409
     case ERROR_CODES.restartRateLimited: return 429
     case ERROR_CODES.restartUnsupported: return 501
+    // 关闭实例：403 是「这次请求不可信」，501 是「这个部署没有 appExit，根本做不到」，
+    // 500 是「宿主退出时抛错了」。三者对用户的下一步完全不同，绝不能合并。
+    case ERROR_CODES.shutdownDenied: return 403
+    case ERROR_CODES.shutdownUnsupported: return 501
+    case ERROR_CODES.shutdownFailed: return 500
     default: return 500
   }
 }

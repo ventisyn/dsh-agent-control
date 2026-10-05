@@ -27,12 +27,14 @@ import { DEFAULT_STOP_TIMEOUT_MS, deleteSession, listSessions } from './session-
 import { deleteTurn, deletedTurns } from './turn-delete.mjs'
 import {
   DEFAULT_UI_REASON,
+  SHUTDOWN_EXIT_DELAY_MS,
   buildRestartStatus,
   checkRestartTrust,
   createRestartState,
   isJsonRequest,
   registerRestartTool,
   requestRestart,
+  requestShutdown,
   startResumeDelivery,
 } from './restart-tool.mjs'
 
@@ -71,17 +73,19 @@ const MAX_BODY_BYTES = 64 * 1024
  * 插件**拿不到**它，`detachEntered` 又是 private，所以本插件**拒绝删除活会话**
  * （见 session-delete.mjs）。
  *
- * 热重启那部分的护栏、状态与日志都在 `./restart-tool.mjs` 里：这里只做接线——两条路由、
- * 工具注册、启动后的「续作投递」。两条入口（模型工具、界面按钮）共用同一个 `requestRestart`。
+ * 热重启与关闭实例那部分的护栏、状态与日志都在 `./restart-tool.mjs` 里：这里只做接线——那部分的
+ * 三条路由（状态 / 重启 / 关闭）、工具注册、启动后的「续作投递」。重启有两条入口（模型工具、
+ * 界面按钮），共用同一个 `requestRestart`；关闭**刻意只有界面一条入口**（让所有会话一起死、
+ * 又不会自动恢复的操作不该由模型发起，AGENTS.md 第 6 节）。
  *
  * @param {any} ctx - cordis 上下文。
  * @param {{ approval?: unknown }} [config] - 插件行的 `config:`（cordis 把 `cordis.patch.yml` 里那一行
  *   的 `config:` 作为第二个参数传进来）。只认 `approval: 'ask' | 'auto'`，未知值一律回退 `ask`
  *   （host 不 import schemastery，手工校验，见 restart-tool.mjs 的 `resolveApprovalMode`）。
- * @param {{ now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, dshHome?: string }} [host] -
+ * @param {{ now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, deferExit?: (fn: () => void) => void, dshHome?: string }} [host] -
  *   **副作用实现**，供离线测试注入。cordis 只传前两个参数，所以生产路径上这里是 `undefined`，
- *   重启用的是真实实现（`setTimeout` / `child_process.spawn` / `ctx.appExit`）。测试必须注入，
- *   否则会真的派生辅助进程并退出测试进程。
+ *   重启用的是真实实现（`setTimeout` / `child_process.spawn` / `ctx.appExit`），关闭用的是
+ *   300 ms 的延迟 `setTimeout`。测试必须注入，否则会真的派生辅助进程并退出测试进程。
  * @returns {void}
  */
 export function apply(ctx, config, host) {
@@ -120,6 +124,14 @@ export function apply(ctx, config, host) {
     path: PATHS.restart,
     handler: wrap(ctx, 'POST', (innerCtx, payload, _url, req) => handleRestartRequest(innerCtx, restart, payload, req), '重启请求失败'),
   }), `${PLUGIN_NAME}: POST ${PATHS.restart}`)
+
+  // 关闭实例：**只有界面这一条入口**（刻意没有模型工具，见 AGENTS.md 第 6 节）。
+  // 可信校验与 /restart 完全一致——它是同一类「让进程消失」的能力。
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PATHS.shutdown,
+    handler: wrap(ctx, 'POST', (innerCtx, _payload, _url, req) => handleShutdownRequest(innerCtx, restart, req), '关闭实例请求失败'),
+  }), `${PLUGIN_NAME}: POST ${PATHS.shutdown}`)
 
   // 模型入口。注册失败只在 restart-tool 内部记日志：界面入口必须照常可用。
   registerRestartTool(ctx, restart)
@@ -183,6 +195,60 @@ async function handleRestartRequest(ctx, restart, payload, req) {
     force: payload?.force === true,
   })
   return { status: 202, body: { ok: true, restartId: result.restartId } }
+}
+
+/**
+ * `POST /api/agent-control/shutdown`：用户从界面关闭这个实例。
+ *
+ * 闸门与 `/restart` 完全一致：先问宿主的 `connection.requestRejection`，再用本插件自己的
+ * 同源/自定义头规则兜底，然后要求 `content-type: application/json`。请求体不要求任何字段
+ * （空体与 `{}` 都算数）——「关掉这个实例」不需要参数，界面点一下就是全部意图。
+ *
+ * ⚠️ **顺序是硬要求：先把 202 发出去，再请求退出。** `ctx.appExit(0)` 会 dispose 整棵树，
+ * webServer 的 dispose 里有 `server.closeAllConnections()`；先退出的话这条 202 会被当场掐断，
+ * 浏览器只看到网络错误，而客户端正是靠这个 202 才敢进「正在关闭」状态（掐断了就显示成「关不掉」）。
+ * 所以 `requestShutdown` 只判定 + 标记，真正的退出排到响应之后的下一拍。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} restart - `createRestartState` 的结果。
+ * @param {any} req - node IncomingMessage（要读 headers）。
+ * @returns {Promise<{ status: number, body: any }>} 202 = 已经接受这次关闭（不是「已经关掉了」）。
+ * @throws {ControlError} 拒绝时抛出，由 wrap 映射成 HTTP（403 / 409 / 501）。
+ */
+async function handleShutdownRequest(ctx, restart, req) {
+  const rejection = safeCall(() => ctx.get?.('connection')?.requestRejection?.({ headers: req?.headers }))
+  const denied = checkRestartTrust(req?.headers, rejection)
+  if (denied !== undefined) {
+    throw new ControlError(
+      ERROR_CODES.shutdownDenied,
+      denied === 401
+        ? '这次请求没有通过宿主的鉴权（401）；请从已登录的界面发起，或重新登录后再试'
+        : '这次请求没有通过可信校验（403）：需要一个同源的浏览器请求，或带上 x-dsh-agent-control: 1 头',
+      { status: denied },
+    )
+  }
+  if (!isJsonRequest(req?.headers)) {
+    throw new ControlError(ERROR_CODES.invalidRequest, '只接受 content-type: application/json 的请求')
+  }
+  const result = await requestShutdown(ctx, restart)
+  // 兜底：deps 一定带 deferExit（createRestartState 会给），这里再查一次是为了绝不出现
+  // 「标记成关闭中、却没人去请求退出」——那才是真的假装关掉了。
+  const deferExit = typeof restart?.deferExit === 'function'
+    ? restart.deferExit
+    : (fn) => {
+      setTimeout(fn, SHUTDOWN_EXIT_DELAY_MS)
+    }
+  deferExit(() => {
+    try {
+      result.exit()
+    } catch (error) {
+      // 响应已经发出去了，改不了它（也绝不再回一个「已经关掉」）：**如实记错误日志**。
+      // 标记已由 exit 自己复原，用户可以再点一次，或改从启动器/终端停止。
+      const control = toControlError(error, '关闭实例失败')
+      ctx.logger?.error?.(`${PLUGIN_NAME}: ${control.message}`)
+    }
+  })
+  return { status: 202, body: { ok: true } }
 }
 
 /**

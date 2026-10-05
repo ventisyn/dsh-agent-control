@@ -76,6 +76,16 @@ export const IDLE_TIMEOUT_MS = 30 * 1000
 /** 拿不到 `appReady` 时，给应用留多少启动时间再投递续作消息。 */
 export const RESUME_FALLBACK_MS = 1500
 
+/**
+ * 关闭实例时，「请求宿主退出」推迟多久（毫秒）。
+ *
+ * 这一段延迟是**必需的**：`ctx.appExit(0)` 会 dispose 整棵树，webServer 的 dispose 里有
+ * `server.closeAllConnections()`。先退出再回响应的话，那条 202 会被当场掐断，浏览器只看到网络错误
+ * ——而客户端正是靠这个 202 才敢进「正在关闭」状态，掐断了它界面就显示成「关不掉」。
+ * 300 ms 足够让响应刷出去（与 M0 原型实测一致的量级）。
+ */
+export const SHUTDOWN_EXIT_DELAY_MS = 300
+
 /** 启动规格文件名（放在重启状态目录里；辅助进程把结果写在同一个目录）。 */
 const SPEC_FILE = 'spec.json'
 
@@ -92,11 +102,13 @@ const PREFLIGHT_PROBE_FILE = '.preflight-probe.json'
 /**
  * 进程内的重启运行时状态。
  *
- * ⚠️ 这三个变量**只活在当前进程里，进程一退出就全部清零——这正是我们要的**：
+ * ⚠️ 这几个变量**只活在当前进程里，进程一退出就全部清零——这正是我们要的**：
  *   - 单飞锁是「这次运行期间最多有一个重启在走」的约束，新进程不该继承上一个进程的锁
  *     （旧进程退出后锁自然消失，新进程从零开始）；
  *   - 限频账本同理，落盘反而会让新进程拿一个它没发起过的历史去拒绝用户；
- *   - 续作投递标记只对「本次启动」有意义。
+ *   - 续作投递标记只对「本次启动」有意义；
+ *   - 关闭标记描述的是「**这个**进程正在消失」——活着才有意义（新进程根本没有这回事），
+ *     所以它既不落盘、也不该被继承。
  * 因此它们**刻意**不写进任何文件，也不在 `apply` 之间重置（重复 apply 只应共享同一把锁）。
  */
 const runtime = {
@@ -106,18 +118,21 @@ const runtime = {
   rateHistory: [],
   /** 续作投递是否已经在本进程里安排过（同一次启动只安排一次）。 */
   resumeScheduled: false,
+  /** 是否已经接受过一次关闭实例请求（退出动作已经安排好，还没执行完）。 */
+  shuttingDown: false,
 }
 
 /**
- * 仅供离线测试：清空进程内的单飞锁与限频账本。
+ * 仅供离线测试：清空进程内的单飞锁、限频账本与关闭标记。
  *
- * 生产代码**永远不该**调用它——这两个变量在真实进程里只能由「进程退出」清零（见上面 runtime 的说明）。
+ * 生产代码**永远不该**调用它——这几个变量在真实进程里只能由「进程退出」清零（见上面 runtime 的说明）。
  * 测试需要它，是因为它们在同一个进程里连续跑多个场景，而单飞锁与限频账本按设计不跨测试重置。
  */
 export function resetRestartRuntimeForTest() {
   runtime.inFlight = null
   runtime.rateHistory = []
   runtime.resumeScheduled = false
+  runtime.shuttingDown = false
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +147,7 @@ export function resetRestartRuntimeForTest() {
  * 进程）、`appExit`（退出进程）。测试传 `schedule: () => {}` 就永远不会真的派生进程或退出。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {{ dshHome?: string, config?: any, now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, pid?: number, bootId?: string, startedAt?: number, port?: number, isWebApp?: boolean, argv?: string[], helperPath?: string, logFile?: string, statusUrl?: string }} [options] - 覆盖项（测试与特殊部署用）。
+ * @param {{ dshHome?: string, config?: any, now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, deferExit?: (fn: () => void) => void, pid?: number, bootId?: string, startedAt?: number, port?: number, isWebApp?: boolean, argv?: string[], helperPath?: string, logFile?: string, statusUrl?: string }} [options] - 覆盖项（测试与特殊部署用）。
  * @returns {any} deps。
  */
 export function createRestartState(ctx, options = {}) {
@@ -175,6 +190,13 @@ export function createRestartState(ctx, options = {}) {
     },
     spawn: typeof options.spawn === 'function' ? options.spawn : spawn,
     appExit: typeof options.appExit === 'function' ? options.appExit : undefined,
+    // 关闭实例的「延迟退出」：**先回 202，再请求退出**（顺序错了响应会被 closeAllConnections 掐断，
+    // 见 SHUTDOWN_EXIT_DELAY_MS）。测试注入一个队列就能确定性地驱动它，不必真的等 300 ms。
+    deferExit: typeof options.deferExit === 'function'
+      ? options.deferExit
+      : (fn) => {
+        setTimeout(fn, SHUTDOWN_EXIT_DELAY_MS)
+      },
   }
 
   // 端口相关的三项做成**惰性读取**：`webServer.port` 只有 listen 完成之后才是真实端口
@@ -411,7 +433,7 @@ function headerValue(headers, name) {
  * 发起一次热重启：**工具与 HTTP 两条入口都走这里**，护栏、状态、日志因此只有一份。
  *
  * 守卫顺序（每条拒绝都带一个能指导下一步的错误码）：
- *   ① 单飞：已有进行中的重启 ⇒ `RESTART_IN_PROGRESS`；
+ *   ① 单飞：已有进行中的重启、或实例已经在关闭中 ⇒ `RESTART_IN_PROGRESS`；
  *   ② 限频：`checkRateLimit` ⇒ `RESTART_RATE_LIMITED`；
  *   ③ 阻塞项：别的会话 / 后台任务在跑 ⇒ `RESTART_BLOCKED`（`force` 可跳过，界面上的「仍然重启」）；
  *   ④ 预检：`appExit` / 启动规格 / 辅助脚本 / 目录可写 ⇒ `RESTART_UNSUPPORTED`；
@@ -438,6 +460,14 @@ export async function requestRestart(ctx, deps, request = {}) {
     throw new ControlError(
       ERROR_CODES.restartInProgress,
       `已经有一次重启在进行中（${runtime.inFlight.restartId}，状态 ${runtime.inFlight.state}）；等它结束或新进程起来之后再试`,
+    )
+  }
+  // 反向单飞：这个实例已经在关闭中（退出动作已经安排好、正要执行）。此刻再排一次重启毫无意义
+  // ——辅助进程会去等一个正在消失的实例；而且关闭是「现在就停」，不会给重启留出交接的机会。
+  if (runtime.shuttingDown === true) {
+    throw new ControlError(
+      ERROR_CODES.restartInProgress,
+      '实例正在关闭：关闭请求已经发出，退出动作已经安排好，这次重启不会再被安排；等进程真的退出后从启动器或终端重新起一个',
     )
   }
 
@@ -545,6 +575,79 @@ function deniedByOutcome(outcome) {
   }[outcome]
   const suffix = detail === undefined ? `审批返回了无法识别的结果：${String(outcome)}` : detail
   return new ControlError(ERROR_CODES.restartDenied, `${suffix}；进程没有做任何改动`)
+}
+
+// ---------------------------------------------------------------------------
+// 关闭实例
+// ---------------------------------------------------------------------------
+
+/**
+ * 关掉这个实例（退出进程）：**只有界面能发起**——刻意不给模型任何「关闭实例」工具，
+ * 因为关掉实例会让所有会话一起死、而且不会自动恢复（AGENTS.md 第 6 节）。
+ *
+ * 与热重启是两件事，别混：
+ *   - 关闭就是让这个进程退出，**没有辅助进程、没有新进程、没有续作投递**；
+ *   - 因此也**不等空闲**。`whenIdle` / `flush` 那一套是热重启为了「不写坏日志尾部 + 新进程
+ *     能接着投递续作」才要的；关闭的语义是「现在就停」，等价于用户直接关窗口——宿主本来就要
+ *     能处理这种尾部。在这里等空闲只会让一个「关不掉」的按钮出现。
+ *
+ * ⚠️ 本函数**只判定、只标记，自己不调用 `appExit`**：退出动作做成返回值交给路由层，由路由层在
+ * 202 响应真的发出去之后再触发（顺序理由见 `SHUTDOWN_EXIT_DELAY_MS`）。判定失败时根本不会
+ * 安排退出，响应于是正常带着原因返回。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} deps - `createRestartState` 的结果。
+ * @returns {Promise<{ ok: true, exit: () => void }>} `exit` = 请求宿主退出的动作（调用一次即退出）。
+ * @throws {ControlError} 被拒绝时抛出：409 进行中（含已在关闭）、501 这个部署没有 appExit。
+ */
+export async function requestShutdown(ctx, deps) {
+  // ① 幂等：已经在关闭中（300 ms 响应窗口里又点了一次，或客户端重试）⇒ 拒绝，**不再安排第二次退出**。
+  //    返回 409 而不是 202：第二次请求确实没有被接受，说成接受就是撒谎。
+  if (runtime.shuttingDown === true) {
+    throw new ControlError(
+      ERROR_CODES.restartInProgress,
+      '实例正在关闭：关闭请求已经发出，退出动作已经安排好，不会再安排第二次',
+    )
+  }
+
+  // ② 单飞：热重启在飞时绝不插队——那套时序随时会派生辅助进程并退出旧进程，两条路一起走
+  //    会留下一个「以为自己在接管」的孤儿辅助进程（VERIFY 6.10 记的就是这类残留）。
+  if (runtime.inFlight !== null) {
+    throw new ControlError(
+      ERROR_CODES.restartInProgress,
+      `已经有一次热重启在进行中（${runtime.inFlight.restartId}，状态 ${runtime.inFlight.state}）；等它结束或新进程起来之后再试`,
+    )
+  }
+
+  // ③ 预检：只有 `appExit` 这一条。关闭不需要启动规格、辅助脚本、可写目录、重放的启动参数
+  //    ——那几项是热重启为了「起一个新进程」才要的，拿它们来否决关闭只会让按钮无故变灰。
+  const appExit = appExitOf(ctx, deps)
+  if (typeof appExit !== 'function') {
+    throw new ControlError(
+      ERROR_CODES.shutdownUnsupported,
+      '这个部署没有提供 appExit，插件无法请求退出（请从启动器或终端停止它）',
+    )
+  }
+
+  // ④ 从这个点起这个进程已经在「关闭中」：热重启与再一次关闭都据此拒绝（见 runtime 的说明）。
+  runtime.shuttingDown = true
+
+  // ⑤ logger 可能根本没有落点，但调用它是无害的；这一行往往是排障时唯一的线索。
+  ctx.logger?.warn?.(`${PLUGIN_NAME}: 收到关闭实例请求，正在退出进程`)
+
+  // ⑥ 退出动作：调用方才真的退出。它抛错时**绝不假装已经关掉**——复原标记（用户可以再点一次，
+  //    或改从启动器/终端停止），并如实抛出 `SHUTDOWN_FAILED`（500）。
+  return {
+    ok: true,
+    exit: () => {
+      try {
+        appExit(0)
+      } catch (error) {
+        runtime.shuttingDown = false
+        throw new ControlError(ERROR_CODES.shutdownFailed, `请求宿主退出时抛错：${describeError(error)}`)
+      }
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1152,10 @@ export function buildRestartStatus(ctx, deps) {
     // 靠读代码推断不算数，能在这里看见才算实测（见 docs/VERIFY-*.md）。
     approvalMode: deps.approvalMode,
     canRestart: preflight.ok === true && blockerFailure === '',
+    // 能不能请求「关闭实例」：**只看 appExit 能否拿到**，与 canRestart 是两件事——
+    // 关闭不需要启动规格 / 辅助脚本 / 可写目录，也不看阻塞项（关掉实例本来就会让它们一起停）。
+    // 形状固定是布尔，界面直接拿它绑按钮的禁用态。
+    canShutdown: typeof appExitOf(ctx, deps) === 'function',
     blockers: {
       sessions: Array.isArray(blockers?.sessions)
         ? blockers.sessions.map((row) => ({
