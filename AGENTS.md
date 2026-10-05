@@ -6,7 +6,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 196 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 217 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`SESSION_LIVE`（409）、`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）
@@ -44,7 +44,7 @@
 | `src/turn-delete.mjs` | 轮次删除：算轮次区间、算 surface 区间、追加删除事务（压缩同形四件套）、认识新旧两种删除记录 |
 | `src/restart.mjs` | **热重启的纯逻辑**：阻塞项计算、限频、启动规格（argv 重放）构造、`pending.json`/`last.json` 读写与过期判断（不 import cordis，可离线单测） |
 | `src/restart-helper.mjs` | **热重启的辅助进程**：旧进程退出后拉起新进程并探测就绪。单文件、只用 `node:*`、不 import 本仓库任何模块；由旧进程以 `detached` 派生，**活在旧进程之外** |
-| `src/restart-tool.mjs` | **热重启的接线**：`restart_harness` 工具定义 + 唯一入口 `requestRestart`（守卫、审批、单飞、退出时序），工具与 HTTP 路由共用它 |
+| `src/restart-tool.mjs` | **热重启与关闭实例的接线**：`restart_harness` 工具定义 + 唯一入口 `requestRestart`（守卫、审批、单飞、退出时序），以及 `requestShutdown`（只判定 + 返回退出动作，**没有模型工具**）；工具与 HTTP 路由共用它们 |
 | `src/shared.mjs` | host 与 client 共用的常量与纯工具（路由路径、错误码、id 校验、轮次括号） |
 | `client.js` | 浏览器端 bundle，经 `window.__ModuleLoader__.load({ id: 'dsh-agent-control', factory })` 注册 |
 | `test/*.test.mjs` | 离线测试（`npm test` 的主体），六个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线、热重启纯逻辑、热重启辅助进程（`host.test.mjs`：HTTP 状态映射与活会话闸门） |
@@ -220,6 +220,10 @@ GET  /api/agent-control/restart/status         # { ok, bootId, pid, startedAt, p
                                                # 只暴露状态，不接受任何状态变更
 POST /api/agent-control/restart                # { reason?, force? } → 202 { ok, restartId }
                                                # 唯一会改变进程状态的接口 ⇒ 必须过可信校验（见下）
+POST /api/agent-control/shutdown               # { }（可空体）→ 202 { ok }
+                                               # 关闭整个实例（ctx.appExit(0)）。**只从界面触发**，没有对应的模型工具：
+                                               # 关掉实例会让所有会话一起死且不会自动续作，这个决定只能由人来做。
+                                               # 与 /restart 共用同一道可信校验；⚠️ 响应必须**先于**退出发出（见 3.9）
 ```
 
 失败一律 `{ ok: false, error: { code, message } }`，状态码由错误码映射（400 / 403 / 404 / 409 / 423 / 429 / 501）。**删除类的路由没有鉴权**：DSH 的插件自建路由不走 harness 的鉴权链路，谁都能访问这个端口就能调用删除。因此：
@@ -314,6 +318,15 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
   - 这需要启动器提供重启接口才能解决，而计划明确「不控制 DSHL、不假设它有这种接口」，所以只能文档化。
 
 **界面**：设置页一页（`settings.section`，id `agent-control-restart`）+ `shell.overlay` 里的**非阻塞横幅**。⚠️ **不做自动 `location.reload()`**——S4 实测页面会自己恢复；只有失败态里用户点「刷新页面」才 reload。横幅在设置面板打开时会被挡住（overlay 的 z-index 低于面板），进度此时显示在设置页那一行里。
+
+**关闭实例**（同一页里的第二个按钮，`POST /restart` 之外的 `POST /shutdown`）：
+
+- **刻意不做模型工具**：关掉实例会让所有会话与后台任务一起中断，而且**没有续作**（不会自动回来）。破坏性操作只从界面触发、必须过一次显式勾选确认（第 6 节）。
+- 它存在的直接理由是 6.10 那个孤儿场景：启动器失去跟踪后，浏览器是唯一还剩的收尾入口。
+- **不等空闲**：`whenIdle` / `flush` 那一套是热重启为了「不写坏日志尾部 + 能续作」才要的；关闭等价于用户直接关窗口，宿主本来就要能处理这种尾部。这条差异必须写在代码注释里，别被后人「统一」掉。
+- ⚠️ **响应顺序是硬要求**：`requestShutdown` 只判定 + 标记并返回一个 `exit` 动作，**由路由先把 202 发出去**，再用 `deferExit`（300 ms）请求退出。反过来的话，`appExit` 触发的 dispose 里有 `server.closeAllConnections()`，会把那条 202 掐断，而客户端正是靠它才敢进「正在关闭」状态。
+- **幂等**：退出窗口内的第二次 `POST /shutdown` 得到 409（不会再排一次退出）；关闭进行中调 `requestRestart` 也是 409，反之亦然。
+- `appExit` 不存在 ⇒ 501；`exit` 抛错 ⇒ 复原标记 + `SHUTDOWN_FAILED`，**绝不假装已经关掉**。
 
 ## 4. 与 DSH 版本的耦合点 ⚠️
 
@@ -412,11 +425,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**196 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
+- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**217 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
 - ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（29）、`node test/client.test.mjs`（43）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（23），合计同样是 **196 项全绿**。
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（40）、`node test/client.test.mjs`（53）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（23），合计同样是 **217 项全绿**。
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
 - ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
