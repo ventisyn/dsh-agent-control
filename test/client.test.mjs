@@ -1846,3 +1846,592 @@ test('整段 bundle 在拿不到原生原语时仍然加载得起来，主按钮
   }
 })
 
+// ---------------------------------------------------------------------------
+// 关闭实例：设置页那一行、同一个 overlay 宿主、关闭态机、以及「关不掉」的出口
+//
+// 动机见 docs/VERIFY-0.2.1-alpha.1-v1.1.0.md 6.10：热重启在 DSHL 托管的用法下会交出
+// 一个**孤儿进程**——它还服务着页面，但启动器里看不到也停不掉。这个按钮是它唯一的收尾入口。
+// ---------------------------------------------------------------------------
+
+/** 收集假元素树里所有满足条件的元素（顺序 = 文档顺序）。 */
+function findAll(node, predicate, out = []) {
+  if (node === null || node === undefined || typeof node !== 'object') return out
+  if (predicate(node)) out.push(node)
+  for (const child of Array.isArray(node.children) ? node.children : []) findAll(child, predicate, out)
+  return out
+}
+
+/** 按类名收集元素（`findByClass` 的复数版：设置页有两个危险态按钮）。 */
+function findAllByClass(node, className) {
+  return findAll(node, (element) => String(element.props?.className ?? '').split(/\s+/).includes(className))
+}
+
+/** 设置页里的重启主按钮（危险态）。 */
+const restartButtonIn = (tree) => findByClass(tree, 'dsh-agent-control-danger')
+
+/** 设置页里的「关闭实例」那一行（按标题认，按钮文案会随阶段变）。 */
+const shutdownRowIn = (tree) => findAllByClass(tree, 'dsh-agent-control-row')
+  .find((row) => collectText(row).join('\n').includes('关闭实例'))
+
+/**
+ * 设置页里的「关闭 DSH」按钮。
+ *
+ * 两个危险态按钮类名相同，所以先认行、再认行里的按钮：按文案找会在「正在关闭…」
+ * 那种阶段漏掉（那正是这个按钮自己的进度文案）。
+ */
+const shutdownButtonIn = (tree) => {
+  const row = shutdownRowIn(tree)
+  return row === undefined ? undefined : findByClass(row, 'dsh-agent-control-danger')
+}
+
+/**
+ * 只接管 `window` 的定时器（关闭流程的两个定时器靠它推进）。
+ *
+ * 与 `stubAnimationApis` 分开：这里不碰 getComputedStyle / requestAnimationFrame，
+ * 免得顺带改变折叠动画的路径（那会让别的用例测到不一样的东西）。
+ */
+function stubTimers() {
+  const originals = {
+    setTimeout: globalThis.window.setTimeout,
+    clearTimeout: globalThis.window.clearTimeout,
+  }
+  const timers = []
+  globalThis.window.setTimeout = (callback, delay) => {
+    timers.push({ callback, delay })
+    return timers.length
+  }
+  globalThis.window.clearTimeout = (id) => {
+    const timer = timers[id - 1]
+    if (timer !== undefined) timer.cancelled = true
+  }
+  return {
+    timers,
+    /** 跑完尚未被取消的定时器（被 clearTimeout 取消的不能触发，否则会改已经落定的阶段）。 */
+    runTimers() {
+      for (const timer of timers.splice(0, timers.length)) {
+        if (timer.cancelled !== true) timer.callback()
+      }
+    },
+    restore() {
+      for (const [key, value] of Object.entries(originals)) globalThis.window[key] = value
+    },
+  }
+}
+
+test('设置页新增「关闭实例」行：就在「重启 DSH」下面，同结构同度量，说明如实', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    bootId: 'boot-a',
+    pid: 1,
+    canRestart: true,
+    canShutdown: true,
+    blockers: { sessions: [], jobs: 0 },
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+
+  // 首帧（状态还没回来）就该画出来：读不到 canShutdown 时不预先禁用，让宿主裁决。
+  const first = renderComponent(section.component, {})
+  const firstButton = shutdownButtonIn(first)
+  assert.ok(firstButton, '★ 必须画出「关闭 DSH」按钮')
+  assert.equal(firstButton.type.name, 'Button', '用原生 Button（危险态靠 token 改写，不自造色值）')
+  assert.equal(firstButton.props.disabled, false, '读不到 canShutdown 时不预先禁用')
+  assert.equal(shutdownRowIn(first) !== undefined, true, '★ 必须有「关闭实例」这一行')
+
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(section.component, {})
+
+  const rows = findAllByClass(tree, 'dsh-agent-control-row')
+  const shutdownRow = shutdownRowIn(tree)
+  const restartRow = rows.find((row) => collectText(row).join('\n').includes('重启 DSH'))
+  assert.ok(restartRow, '重启那一行仍然在')
+  assert.equal(
+    rows.indexOf(shutdownRow),
+    rows.indexOf(restartRow) + 1,
+    '★ 关闭行必须紧跟在「重启 DSH」那一行下面（同一套行结构与分隔线）',
+  )
+
+  const description = collectText(findByClass(shutdownRow, 'dsh-agent-control-row-desc')).join('\n')
+  assert.ok(description.includes('整个 DSH 进程'), '★ 说明要如实说清它会停掉整个 DSH 进程')
+  assert.ok(description.includes('正在运行的任务与会话都会被中断'), '★ 要点明正在运行的任务与会话会中断')
+  assert.ok(description.includes('不会自动重启'), '★ 要点明不会自动重启')
+  assert.ok(description.includes('启动器或终端'), '★ 要说清要再启动得去启动器 / 终端')
+  assert.ok(description.includes('失去跟踪'), '★ 要点明适用场景：启动器已经失去跟踪的实例')
+  assert.ok(description.includes('唯一的收尾入口'), '★ 要说清这是那种情况下唯一的收尾入口')
+
+  assert.equal(shutdownButtonIn(tree).props.disabled, false)
+  assert.equal(restartButtonIn(tree).props.disabled, false, '空闲时重启按钮照常可用')
+  restartApi().reset()
+})
+
+test('宿主说关不掉时：关闭按钮禁用，并原样显示它给出的原因', async (t) => {
+  // 宿主对「关不掉」只给布尔 canShutdown，没有关闭专用的原因字段；能显示的原因就是
+  // `unsupportedReason`（canShutdown:false 时它必然是「拿不到 appExit」那一条）。
+  const answer = { canShutdown: false, unsupportedReason: '宿主没有提供 appExit，无法在后台安全退出旧进程' }
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    bootId: 'boot-a',
+    pid: 1,
+    canRestart: true,
+    ...answer,
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+  renderComponent(section.component, {})
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(section.component, {})
+
+  assert.equal(shutdownButtonIn(tree).props.disabled, true, '★ canShutdown:false 时按钮必须禁用')
+  assert.ok(
+    collectText(shutdownRowIn(tree)).join('\n').includes('宿主没有提供 appExit，无法在后台安全退出旧进程'),
+    '★ 必须原样显示宿主给的原因，不能自己编一句',
+  )
+  assert.equal(restartButtonIn(tree).props.disabled, false, '关不掉实例不影响重启按钮')
+
+  // 宿主连原因都没给：说一句「宿主报告关不掉」，不编一个具体原因出来（AGENTS 坑 ⑨）。
+  answer.unsupportedReason = undefined
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const bare = renderUntilStable(section.component, {})
+  assert.equal(shutdownButtonIn(bare).props.disabled, true)
+  assert.ok(
+    collectText(shutdownRowIn(bare)).join('\n').includes('宿主报告这次部署关不掉实例。'),
+    '拿不到原因时给一句如实的兜底，不留空白也不编原因',
+  )
+  restartApi().reset()
+})
+
+test('关闭按钮只派发 request-shutdown，确认框由同一个 overlay 宿主渲染（overlay 注册仍是 1）', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    bootId: 'boot-a',
+    pid: 1,
+    canShutdown: true,
+    blockers: { sessions: [{ sessionId: 'session-1', title: '正在跑长任务的会话', descendant: true }], jobs: 2 },
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  assert.equal(
+    registrations.filter((entry) => entry.name === 'shell.overlay').length,
+    1,
+    '★ overlay 只能有一条注册：删除 / 重启 / 关闭共用同一个弹窗宿主',
+  )
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  assert.equal(renderComponent(overlay.component, {}), null, '闲着的时候什么都不渲染')
+  const onShutdownRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-shutdown')?.handler
+  assert.equal(typeof onShutdownRequest, 'function', '宿主必须监听 request-shutdown')
+
+  // 设置页按钮：只派发意图，不改状态
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+  renderComponent(section.component, {})
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const button = shutdownButtonIn(renderUntilStable(section.component, {}))
+  dispatchedTypes.length = 0
+  button.props.onClick()
+  assert.deepEqual(dispatchedTypes, ['dsh-agent-control:request-shutdown'], '★ 按钮只派发关闭请求')
+  assert.equal(restartApi().snapshot().phase, 'idle', '派发本身不改状态')
+
+  // 宿主收到请求 → 同一个宿主渲染确认框
+  onShutdownRequest()
+  broadcastRestartChanged(browser.listeners)
+  const opened = renderUntilStable(overlay.component, {})
+  const confirmBox = findElement(opened, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(confirmBox, '★ 确认框必须由同一个 overlay 宿主渲染')
+  assert.equal(confirmBox.props.open, true)
+  assert.equal(confirmBox.props.acknowledged, false, '必须仍然要求显式勾选')
+  assert.equal(confirmBox.props.disabled, false)
+  const description = String(confirmBox.props.description ?? '')
+  assert.ok(description.includes('整个 DSH 进程'), '正文要写清会停止整个进程')
+  assert.ok(description.includes('不会自动重启'), '正文要写清不会自动重启')
+  assert.ok(description.includes('正在跑长任务的会话'), '★ 弹窗要列出会被一起中断的会话')
+  assert.ok(description.includes('后台任务：2'), '★ 后台任务数也要列出来')
+  assert.equal(restartApi().snapshot().phase, 'shutdown-confirming')
+
+  // 提交中：显示进度并禁用（不允许重复提交），也不能取消掉
+  restartApi().dispatch({ type: 'shutdown-submit' })
+  broadcastRestartChanged(browser.listeners)
+  const submitting = renderUntilStable(overlay.component, {})
+  const submittingBox = findElement(submitting, (element) => element.type?.name === 'RiskConfirmation')
+  assert.equal(submittingBox.props.disabled, true, '★ 提交中必须禁用确认按钮')
+  assert.equal(submittingBox.props.confirmLabel, '正在关闭…', '提交中要显示进度')
+  submittingBox.props.onCancel()
+  assert.equal(restartApi().snapshot().phase, 'shutdown-requested', '★ 提交中不允许取消把阶段拉回去')
+  restartApi().reset()
+})
+
+test('关闭态机：idle → shutdown-confirming → shutdown-requested → closing → closed', () => {
+  const { initial, next, shutdownPhases, shutdownConstants } = restartApi()
+  assert.deepEqual(shutdownConstants, { requestTimeoutMs: 8000, closedAfterMs: 6000 })
+  assert.deepEqual(shutdownPhases, ['shutdown-confirming', 'shutdown-requested', 'closing', 'closed', 'shutdown-failed'])
+
+  let state = initial()
+  state = next(state, { type: 'shutdown-confirm' })
+  assert.equal(state.phase, 'shutdown-confirming')
+  // 关闭流程里的重启事件一律无动作（引用相等 ⇒ 不广播、不重渲染）
+  assert.equal(next(state, { type: 'confirm' }), state, '★ 关闭确认中不能被重启流程插进来')
+  assert.equal(next(state, { type: 'submit' }), state)
+
+  state = next(state, { type: 'shutdown-submit' })
+  assert.equal(state.phase, 'shutdown-requested')
+  assert.equal(next(state, { type: 'shutdown-submit' }), state, '★ 重复提交必须原样返回')
+
+  state = next(state, { type: 'shutdown-accepted', at: 1000 })
+  assert.equal(state.phase, 'closing', '★ 202 之后立刻进 closing')
+  assert.equal(state.shutdownAcceptedAt, 1000)
+  assert.equal(state.shutdownError, null)
+
+  // 提交关闭之后 HTTP 必然不通：状态请求失败是**预期**，既不改阶段也不写错误。
+  assert.equal(next(state, { type: 'status-failed', at: 2000 }), state, '★ 状态请求失败必须原样返回')
+  assert.equal(next(state, { type: 'shutdown-cancel' }), state, '提交出去之后不能被取消掉')
+
+  // 宿主还在应答也只刷新展示数据：不改阶段（「已关闭」这条线由时间说了算）。
+  const answered = next(state, { type: 'status', at: 3000, payload: { ok: true, bootId: 'boot-b', pid: 9 } })
+  assert.equal(answered.phase, 'closing', '★ bootId 变了也不能把关闭流程改成「重启完成」')
+  assert.equal(answered.status.bootId, 'boot-b')
+
+  const closed = next(state, { type: 'shutdown-elapsed', at: 7000 })
+  assert.equal(closed.phase, 'closed')
+  // 终态：重启与关闭事件都不再受理，横幅也关不掉（它是页面仅剩的信息）。
+  assert.equal(next(closed, { type: 'confirm' }), closed)
+  assert.equal(next(closed, { type: 'shutdown-confirm' }), closed)
+  assert.equal(next(closed, { type: 'shutdown-dismiss' }), closed)
+  assert.deepEqual(next(closed, { type: 'reset' }), initial())
+})
+
+test('关闭态机：被拒退回确认态带原因；长时间无回应落成可重试的失败态', () => {
+  const { initial, next } = restartApi()
+
+  let state = next(initial(), { type: 'shutdown-confirm' })
+  state = next(state, { type: 'shutdown-submit' })
+  state = next(state, { type: 'shutdown-rejected', code: 'SHUTDOWN_DENIED', message: '可信校验没过', at: 1000 })
+  assert.equal(state.phase, 'shutdown-confirming', '★ 被拒不是「已经关掉了」：宿主还好好的，弹窗留着')
+  assert.equal(state.shutdownError?.code, 'SHUTDOWN_DENIED')
+  assert.equal(state.shutdownError?.message, '可信校验没过')
+  assert.equal(next(state, { type: 'shutdown-cancel' }).phase, 'idle')
+
+  // 连错误码都没有（请求根本没发出去）：也必须给关闭自己的兜底码，不能落进删除的文案。
+  const noCode = next(next(next(initial(), { type: 'shutdown-confirm' }), { type: 'shutdown-submit' }), { type: 'shutdown-rejected' })
+  assert.equal(noCode.phase, 'shutdown-confirming')
+  assert.equal(noCode.shutdownError?.code, 'SHUTDOWN_REQUEST_FAILED')
+
+  // 一直在飞、宿主不回答：到点落成 shutdown-failed，不做无限等待。
+  // （「到点」由界面排的定时器决定，时长见 shutdownConstants.requestTimeoutMs。）
+  const pending = next(next(initial(), { type: 'shutdown-confirm' }), { type: 'shutdown-submit' })
+  const timedOut = next(pending, { type: 'shutdown-request-timeout', at: 9000 })
+  assert.equal(timedOut.phase, 'shutdown-failed')
+  assert.equal(timedOut.shutdownError?.code, 'SHUTDOWN_REQUEST_TIMEOUT')
+  assert.equal(next(timedOut, { type: 'shutdown-accepted', at: 9500 }), timedOut, '★ 判过超时之后迟到的 202 不能改阶段')
+
+  // 「重试」直接回到「请求在飞」，勾选状态不清（由弹窗那边保留）。
+  const retried = next(timedOut, { type: 'shutdown-retry' })
+  assert.equal(retried.phase, 'shutdown-requested')
+  assert.equal(retried.shutdownError, null)
+  // 「关闭弹窗」回 idle；认不出的事件原样返回。
+  assert.equal(next(timedOut, { type: 'shutdown-dismiss' }).phase, 'idle')
+  assert.equal(next(timedOut, { type: 'nonsense' }), timedOut)
+  // 空闲时也能被叫起来（重启的 done / failed 是终态，不算「占着界面」）。
+  assert.equal(next({ ...initial(), phase: 'done' }, { type: 'shutdown-confirm' }).phase, 'shutdown-confirming')
+  assert.equal(next({ ...initial(), phase: 'confirming' }, { type: 'shutdown-confirm' }).phase, 'confirming', '★ 重启确认中不许再开一个关闭弹窗')
+})
+
+test('关闭被接受后立刻进 closing：横幅说明、状态请求失败不算错误，随后落定 closed（绝不自动刷新）', async (t) => {
+  const reload = captureReload(t)
+  let windowCloseCalls = 0
+  globalThis.window.close = () => { windowCloseCalls += 1 }
+  t.after(() => { delete globalThis.window.close })
+
+  const browser = captureBrowser(t, (url) => {
+    // 关闭请求本身会得到 202；202 之后服务端就没了，任何状态请求都只会失败——那正是预期。
+    if (url.includes('/shutdown')) return { ok: true, status: 202, json: async () => ({ ok: true }) }
+    throw new Error('ECONNREFUSED')
+  })
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, {})
+  const onShutdownRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-shutdown')?.handler
+  assert.equal(typeof onShutdownRequest, 'function', '宿主必须监听 request-shutdown')
+
+  const timers = stubTimers()
+  try {
+    onShutdownRequest()
+    assert.equal(restartApi().snapshot().phase, 'shutdown-confirming')
+    await restartApi().submitShutdown()
+    await flush()
+
+    assert.equal(restartApi().snapshot().phase, 'closing', '★ 202 之后立刻进 closing')
+    assert.deepEqual(
+      timers.timers.map((timer) => ({ delay: timer.delay, cancelled: timer.cancelled === true })),
+      [{ delay: 8000, cancelled: true }, { delay: 6000, cancelled: false }],
+      '进入 closing 要清掉「等宿主回答」的超时，改排「等它退出」的定时器（5–10 秒）',
+    )
+    assert.equal(reload.reloads, 0, '★ 关闭进行中绝不自动刷新页面')
+
+    // 状态请求失败是预期：阶段不变、错误不写。
+    await restartApi().poll({ force: true })
+    await flush()
+    assert.equal(restartApi().snapshot().phase, 'closing', '★ 状态请求失败不能把关闭流程打回失败')
+    assert.equal(restartApi().snapshot().shutdownError, null, '★ 更不能渲染成红色错误')
+
+    broadcastRestartChanged(browser.listeners)
+    const closing = renderUntilStable(overlay.component, {})
+    const card = findByClass(closing, 'dsh-agent-control-banner-card')
+    assert.ok(card, '★ 关闭期间必须有非阻塞横幅')
+    assert.ok(collectText(card).join('\n').includes('DSH 正在关闭…'), '横幅要说清正在关闭')
+
+    // 设置页那一行跟着同一份状态走：关闭中显示进度。
+    const section = registrations.find((entry) => entry.name === 'settings.section')
+    renderComponent(section.component, {})
+    broadcastRestartChanged(browser.listeners)
+    assert.equal(
+      shutdownButtonIn(renderUntilStable(section.component, {})).children[0],
+      '正在关闭…',
+      '关闭进行中：按钮按进度改文案',
+    )
+
+    // 再等一小段：落定 closed，横幅改成「可以关掉这个页面」并给提示。
+    timers.runTimers()
+    assert.equal(restartApi().snapshot().phase, 'closed')
+    broadcastRestartChanged(browser.listeners)
+    const closed = renderUntilStable(overlay.component, {})
+    const closedCard = findByClass(closed, 'dsh-agent-control-banner-card')
+    assert.ok(closedCard, '落定之后横幅仍然在（它是页面仅剩的信息）')
+    const closedText = collectText(closedCard).join('\n')
+    assert.ok(closedText.includes('实例已关闭'), '★ 横幅要改说「实例已关闭」')
+    assert.ok(closedText.includes('可以关掉这个页面'), '★ 要告诉用户可以关掉这个页面')
+    assert.ok(closedText.includes('标签页'), '★ 给「关掉本页」的提示（而不是替用户关）')
+    assert.equal(
+      findAll(closed, (element) => element.type === 'button' || element.type?.name === 'Button').length,
+      0,
+      '★ 关闭落定后不给任何按钮：尤其不能有「重新加载」',
+    )
+
+    // 落定之后设置页那一行也不再说「正在关闭…」（那会和「实例已关闭」自相矛盾）。
+    broadcastRestartChanged(browser.listeners)
+    const settledSection = renderUntilStable(section.component, {})
+    assert.equal(shutdownButtonIn(settledSection).children[0], '关闭 DSH', '落定之后按钮回到正常文案')
+    assert.equal(shutdownButtonIn(settledSection).props.disabled, true, '实例已经关了，不该还能再提交一次')
+    assert.ok(
+      collectText(shutdownRowIn(settledSection)).join('\n').includes('实例已关闭'),
+      '行内说明要说「实例已关闭，可以关掉这个页面」',
+    )
+
+    assert.equal(reload.reloads, 0, '★ 全程零自动刷新')
+    assert.equal(windowCloseCalls, 0, '★ 不调 window.close() 硬关页面')
+  } finally {
+    timers.restore()
+    restartApi().reset()
+  }
+})
+
+test('关闭被拒：宿主的原因留在弹窗里，阶段退回确认态（绝不假装已经在关）', async (t) => {
+  const browser = captureBrowser(t, (url) => {
+    if (url.includes('/shutdown')) {
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({
+          ok: false,
+          error: { code: 'RESTART_IN_PROGRESS', message: '已经有一次重启在进行中（r-1，状态 running）' },
+        }),
+      }
+    }
+    return okPayload({
+      ok: true,
+      bootId: 'boot-a',
+      pid: 1,
+      canShutdown: true,
+      blockers: { sessions: [{ sessionId: 'session-2', title: '长任务会话' }], jobs: 0 },
+    })
+  })
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, {})
+  await restartApi().poll({ force: true })
+  await flush()
+  browser.listeners.find((item) => item.type === 'dsh-agent-control:request-shutdown')?.handler()
+  await restartApi().submitShutdown()
+  await flush()
+
+  const state = restartApi().snapshot()
+  assert.equal(state.phase, 'shutdown-confirming', '★ 被拒不是「关掉了」：宿主还好好的，弹窗留着')
+  assert.equal(state.shutdownError?.code, 'RESTART_IN_PROGRESS')
+
+  broadcastRestartChanged(browser.listeners)
+  const tree = renderUntilStable(overlay.component, {})
+  const confirmBox = findElement(tree, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(confirmBox, '被拒后弹窗必须还在')
+  const description = String(confirmBox.props.description ?? '')
+  assert.ok(
+    description.includes('已经有一次重启或关闭在进行中'),
+    '★ 409 这个码在关闭流程里要说成「重启或关闭」，不能照抄重启的文案',
+  )
+  assert.ok(description.includes('r-1，状态 running'), '★ 必须带上宿主给的原始原因')
+  assert.ok(description.includes('长任务会话'), '弹窗里要带上会被一起中断的阻塞项明细')
+  assert.ok(!description.includes('删除失败'), '★ 绝不能落进删除的兜底文案')
+  restartApi().reset()
+})
+
+test('关不掉（请求一直没有回应）：弹窗给「重试」与「关闭弹窗」，不无限转圈', async (t) => {
+  const reload = captureReload(t)
+  let mode = 'hang'
+  const browser = captureBrowser(t, () => {
+    // 「没回应」= 请求发出去之后既没有成功也没有失败；重试时才让它成功。
+    if (mode === 'hang') return new Promise(() => {})
+    return okPayload({ ok: true })
+  })
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+  renderComponent(overlay.component, {})
+  const onShutdownRequest = browser.listeners
+    .find((item) => item.type === 'dsh-agent-control:request-shutdown')?.handler
+
+  const timers = stubTimers()
+  const openFailedDialog = async () => {
+    onShutdownRequest()
+    // 不能 await：这个请求永远不会回来（真实浏览器里就是「点了没反应」）。
+    void restartApi().submitShutdown()
+    await flush()
+    assert.equal(restartApi().snapshot().phase, 'shutdown-requested')
+    timers.runTimers()
+    assert.equal(restartApi().snapshot().phase, 'shutdown-failed', '★ 长时间没回应必须落定，不无限转圈')
+    assert.equal(restartApi().snapshot().shutdownError?.code, 'SHUTDOWN_REQUEST_TIMEOUT')
+    broadcastRestartChanged(browser.listeners)
+    return findElement(renderUntilStable(overlay.component, {}), (element) => element.type?.name === 'RiskConfirmation')
+  }
+  try {
+    assert.deepEqual(timers.timers.map((timer) => timer.delay), [], '还没提交，不该有定时器')
+
+    const failed = await openFailedDialog()
+    assert.ok(failed, '★ 「关不掉」时弹窗必须留着，给用户出口')
+    assert.equal(failed.props.confirmLabel, '重试', '★ 给「重试」')
+    assert.equal(failed.props.cancelLabel, '关闭弹窗', '★ 给「关闭弹窗」')
+    assert.ok(String(failed.props.description ?? '').includes('没有得到回应'), '要把「没回应」说清楚')
+    assert.equal(reload.reloads, 0, '关不掉也不许偷偷刷新页面')
+
+    // ①「关闭弹窗」：回到 idle，弹窗消失。
+    failed.props.onCancel()
+    broadcastRestartChanged(browser.listeners)
+    assert.equal(restartApi().snapshot().phase, 'idle')
+    assert.equal(
+      findElement(renderUntilStable(overlay.component, {}), (element) => element.type?.name === 'RiskConfirmation'),
+      undefined,
+      '关掉弹窗之后不该再挂着确认框',
+    )
+
+    // ②「重试」：这次宿主回答了 202 ⇒ 照样进 closing。
+    const failedAgain = await openFailedDialog()
+    mode = 'ok'
+    await failedAgain.props.onConfirm()
+    await flush()
+    assert.equal(restartApi().snapshot().phase, 'closing', '★ 重试成功后照样立刻进 closing')
+    assert.equal(restartApi().snapshot().shutdownError, null)
+    assert.equal(reload.reloads, 0)
+  } finally {
+    timers.restore()
+    restartApi().reset()
+  }
+})
+
+test('两个按钮互斥：任一流程占着界面时，另一个按钮禁用', async (t) => {
+  const browser = captureBrowser(t, () => okPayload({
+    ok: true,
+    bootId: 'boot-a',
+    pid: 1,
+    canRestart: true,
+    canShutdown: true,
+  }))
+  restartApi().reset()
+  loaded.apply(makeContext())
+  const section = registrations.find((entry) => entry.name === 'settings.section')
+  renderComponent(section.component, {})
+  await restartApi().poll({ force: true })
+  await flush()
+  broadcastRestartChanged(browser.listeners)
+  const idle = renderUntilStable(section.component, {})
+  assert.equal(restartButtonIn(idle).props.disabled, false, '空闲时重启可用')
+  assert.equal(shutdownButtonIn(idle).props.disabled, false, '空闲时关闭可用')
+  assert.equal(restartApi().isRestartActive(), false)
+  assert.equal(restartApi().isShutdownActive(), false)
+
+  // 重启确认框打开（还没提交）：关闭按钮也得禁用，否则两个弹窗会同时起来。
+  restartApi().dispatch({ type: 'confirm' })
+  assert.equal(restartApi().isRestartActive(), true)
+  broadcastRestartChanged(browser.listeners)
+  assert.equal(shutdownButtonIn(renderUntilStable(section.component, {})).props.disabled, true, '★ 重启确认中关闭按钮禁用')
+
+  // 关闭流程：确认中 / 提交中 / 关闭中，重启按钮一律禁用。
+  restartApi().reset()
+  restartApi().dispatch({ type: 'shutdown-confirm' })
+  assert.equal(restartApi().isShutdownActive(), true)
+  assert.equal(restartApi().isRestartActive(), false)
+  broadcastRestartChanged(browser.listeners)
+  const confirming = renderUntilStable(section.component, {})
+  assert.equal(restartButtonIn(confirming).props.disabled, true, '★ 关闭确认中重启按钮禁用')
+  assert.ok(
+    collectText(confirming).join('\n').includes('关闭流程进行中'),
+    '禁用要说明原因，不能是一个没解释的灰按钮',
+  )
+
+  restartApi().dispatch({ type: 'shutdown-submit' })
+  restartApi().dispatch({ type: 'shutdown-accepted', at: Date.now() })
+  broadcastRestartChanged(browser.listeners)
+  const closing = renderUntilStable(section.component, {})
+  assert.equal(restartButtonIn(closing).props.disabled, true, '★ 关闭进行中重启按钮禁用')
+  assert.equal(shutdownButtonIn(closing).props.disabled, true, '★ 关闭进行中关闭按钮也禁用（不允许重复提交）')
+  assert.equal(shutdownButtonIn(closing).children[0], '正在关闭…', '按进度改文案')
+  restartApi().reset()
+})
+
+test('拿不到原生原语时关闭行照常工作：两个危险按钮都退回自带 button（AGENTS 3.7 不回归）', async () => {
+  const originalLoader = globalThis.window.__ModuleLoader__
+  const originalExpose = globalThis.window.__dshAgentControl
+  let fallbackApply
+  globalThis.window.__ModuleLoader__ = {
+    load(spec) {
+      const exports = spec.factory((id) => {
+        if (id === 'react') return fakeReact
+        throw new Error(`拿不到模块：${id}`)
+      })
+      fallbackApply = exports.apply
+    },
+  }
+  try {
+    const url = `${pathToFileURL(path.join(process.cwd(), 'client.js')).href}?no-primitives-shutdown`
+    await import(url)
+    assert.equal(typeof fallbackApply, 'function', '拿不到原生原语也必须加载得起来')
+    fallbackApply(makeContext())
+    const section = registrations.find((entry) => entry.name === 'settings.section')
+    const tree = renderComponent(section.component, {})
+
+    const danger = findAllByClass(tree, 'dsh-agent-control-danger')
+    assert.equal(danger.length, 2, '★ 重启与关闭两个按钮都要画出来')
+    for (const button of danger) {
+      assert.equal(button.type, 'button', '★ 都退回自带 button（不是崩掉，也不是空白）')
+      assert.match(button.props.className, /dsh-agent-control-button/, '兜底按钮带自己的类名（度量照抄原生）')
+    }
+    assert.deepEqual(danger.map((button) => button.children[1]), ['重启 DSH', '关闭 DSH'], '两个按钮的文案')
+
+    // 关闭按钮的功能不因兜底而丢：照样只派发意图。
+    dispatchedTypes.length = 0
+    danger[1].props.onClick()
+    assert.deepEqual(dispatchedTypes, ['dsh-agent-control:request-shutdown'])
+  } finally {
+    globalThis.window.__ModuleLoader__ = originalLoader
+    globalThis.window.__dshAgentControl = originalExpose
+  }
+})
+

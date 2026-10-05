@@ -20,6 +20,9 @@
     // 热重启（契约见 docs/PLAN-hot-restart.md 3.2）。与 src/shared.mjs 的 PATHS 逐字一致。
     restartStatus: '/api/agent-control/restart/status',
     restart: '/api/agent-control/restart',
+    // 关闭实例：热重启之后的收尾入口（实例被启动器失去跟踪时唯一的关掉它的办法，
+    // 见 docs/VERIFY-0.2.1-alpha.1-v1.1.0.md 6.10）。与 src/shared.mjs 的 PATHS 逐字一致。
+    shutdown: '/api/agent-control/shutdown',
   }
   const LOCALE_NS = 'agent-control'
   /** 自定义事件：按钮只派发目标，弹窗统一监听。 */
@@ -32,6 +35,13 @@
    * 重启真正的状态在模块级态机里（见 `nextRestartPhase`），这个事件只负责「把弹窗叫起来」。
    */
   const RESTART_REQUEST_EVENT = 'dsh-agent-control:request-restart'
+  /**
+   * 自定义事件：请求打开「关闭 DSH」确认弹窗。
+   *
+   * 与删除 / 重启**同一个模式、同一个 overlay 宿主**：按钮只派发意图，
+   * `OverlayDialogs` 统一监听，所以 overlay 槽位永远只有一条注册。
+   */
+  const SHUTDOWN_REQUEST_EVENT = 'dsh-agent-control:request-shutdown'
   /** 自定义事件：重启流程状态变了（设置页与浮层横幅订阅同一份状态）。 */
   const RESTART_CHANGED_EVENT = 'dsh-agent-control:restart-changed'
   /**
@@ -97,6 +107,41 @@
    * 用它判断就绪的那一刻，此时结果文件还没落盘。
    */
   const RESTART_DONE_REFRESH_MS = 1500
+
+  /**
+   * 关闭流程的全部阶段（与重启共用**同一台态机与同一个状态对象**）。
+   *
+   * 时间线：`idle → shutdown-confirming → shutdown-requested → closing → closed | shutdown-failed`。
+   * 「等你确认」刻意**不复用**重启的 `confirming`：一个阶段名对应一个弹窗，
+   * 否则两个确认框会同时满足渲染条件。
+   */
+  const SHUTDOWN_PHASES = ['shutdown-confirming', 'shutdown-requested', 'closing', 'closed', 'shutdown-failed']
+  /**
+   * 关闭流程的忙碌阶段：已经提交出去、还没落定。
+   *
+   * `closed` 也算：实例已经退出，不再有任何可提交的动作。
+   */
+  const SHUTDOWN_BUSY_PHASES = ['shutdown-requested', 'closing', 'closed']
+  /** 关闭流程占着界面的阶段（含「等你确认」）：此时重启按钮一律禁用。 */
+  const SHUTDOWN_ACTIVE_PHASES = ['shutdown-confirming', ...SHUTDOWN_BUSY_PHASES]
+  /** 重启流程占着界面的阶段（含「等你确认」）：此时关闭按钮一律禁用。 */
+  const RESTART_ACTIVE_PHASES = ['confirming', ...RESTART_BUSY_PHASES]
+  /**
+   * 等宿主回答关闭请求的上限。
+   *
+   * 超了就进 `shutdown-failed` 并给出「重试 / 关闭弹窗」——**不无限转圈**。
+   */
+  const SHUTDOWN_REQUEST_TIMEOUT_MS = 8000
+  /**
+   * 202 之后再过多久说「实例已关闭」。
+   *
+   * 从 202 那一刻起页面就不再指望服务端了，所以这条线只能靠时间：等得够久就说
+   * 「可以关掉这个页面」。**不自动刷新页面，也不调 `window.close()`**（浏览器多半不允许，
+   * 而且那样会把「谁来关页面」这件事替用户决定掉）。
+   */
+  const SHUTDOWN_CLOSED_AFTER_MS = 6000
+  /** 态机认得的全部阶段：重启 + 关闭（两者共用一台态机，相位互斥由它保证）。 */
+  const CONTROL_PHASES = [...RESTART_PHASES, ...SHUTDOWN_PHASES]
 
   const ENTRY = {
     sessionMenu: 'agent-control-session-menu',
@@ -497,6 +542,39 @@
     'error.RESTART_DENIED': '这次重启被拒绝了',
     'error.RESTART_TIMEOUT': '重启超时：120 秒内没能重新连上宿主',
     'error.RESTART_REQUEST_FAILED': '重启请求没有发出去',
+    // --- 关闭实例（热重启的收尾入口，见 docs/VERIFY-0.2.1-alpha.1-v1.1.0.md 6.10）-------------
+    'shutdown.title': '关闭实例',
+    'shutdown.action': '关闭 DSH',
+    'shutdown.actionBusy': '正在关闭…',
+    'shutdown.actionDesc': '停止整个 DSH 进程：正在运行的任务与会话都会被中断；关闭之后不会自动重启，要再启动得去启动器或终端。实例被启动器失去跟踪时（例如热重启之后），这里是唯一的收尾入口。',
+    'shutdown.unsupported': '宿主报告这次部署关不掉实例。',
+    'shutdown.busyHint': '关闭流程进行中，重启按钮暂时不可用。',
+    'shutdown.phase.confirming': '等待你确认',
+    'shutdown.phase.requested': '正在请求关闭…',
+    'shutdown.phase.closing': 'DSH 正在关闭…',
+    'shutdown.phase.closed': '实例已关闭，可以关掉这个页面。',
+    'shutdown.phase.failed': '这次没能关掉实例',
+    'shutdown.banner.title': 'DSH 正在关闭…',
+    'shutdown.banner.detail': '实例正在退出，页面不会再收到它的状态。',
+    'shutdown.banner.closedTitle': '实例已关闭',
+    'shutdown.banner.closedDetail': '可以关掉这个页面了。要再启动，请到启动器或终端里重新启动 DSH。',
+    'shutdown.banner.closedHint': '关掉这个浏览器标签页就行——浏览器不允许页面自己关掉自己。',
+    'shutdown.dialog.title': '关闭 DSH？',
+    'shutdown.dialog.body': '会停止整个 DSH 进程：正在运行的任务、会话以及它们的后台任务都会被中断。关闭之后不会自动重启，要再启动得去启动器或终端。实例被启动器失去跟踪时（例如热重启之后），这是唯一的收尾入口。',
+    'shutdown.dialog.ack': '我明白关闭实例会中断正在运行的任务，而且不会自动重启',
+    'shutdown.dialog.confirm': '关闭 DSH',
+    'shutdown.dialog.working': '正在关闭…',
+    'shutdown.dialog.failedTitle': '没能关掉这个实例',
+    'shutdown.dialog.failedBody': '关闭请求没有成功，实例多半还在运行。可以重试，也可以先关掉这个弹窗。',
+    'shutdown.dialog.retry': '重试',
+    'shutdown.dialog.close': '关闭弹窗',
+    'shutdown.blockers': '下面这些会被一起中断',
+    'error.SHUTDOWN_DENIED': '这次关闭被拒绝了',
+    'error.SHUTDOWN_UNSUPPORTED': '这个部署关不掉实例：宿主没有提供退出进程的能力（appExit）',
+    'error.SHUTDOWN_IN_PROGRESS': '已经有一次重启或关闭在进行中了，等它结束再试',
+    'error.SHUTDOWN_FAILED': '没能关掉这个实例',
+    'error.SHUTDOWN_REQUEST_FAILED': '关闭请求没有发出去',
+    'error.SHUTDOWN_REQUEST_TIMEOUT': '关闭请求没有得到回应',
   }
 
   const en = {
@@ -590,6 +668,39 @@
     'error.RESTART_DENIED': 'This restart was refused',
     'error.RESTART_TIMEOUT': 'Restart timed out: the host did not come back within 120 seconds',
     'error.RESTART_REQUEST_FAILED': 'The restart request could not be sent',
+    // --- Shut the instance down (the cleanup path for hot restart) --------------------------
+    'shutdown.title': 'Shut down instance',
+    'shutdown.action': 'Shut down DSH',
+    'shutdown.actionBusy': 'Shutting down…',
+    'shutdown.actionDesc': 'Stops the whole DSH process: running tasks and sessions are interrupted. It does not restart on its own — start it again from the launcher or a terminal. When the launcher has lost track of this instance (after a hot restart, for example), this is the only way to close it down.',
+    'shutdown.unsupported': 'The host reports that this deployment cannot shut the instance down.',
+    'shutdown.busyHint': 'A shutdown is in progress, so restart is unavailable for now.',
+    'shutdown.phase.confirming': 'Waiting for your confirmation',
+    'shutdown.phase.requested': 'Requesting the shutdown…',
+    'shutdown.phase.closing': 'DSH is shutting down…',
+    'shutdown.phase.closed': 'The instance is closed; you can close this page.',
+    'shutdown.phase.failed': 'The instance could not be closed',
+    'shutdown.banner.title': 'DSH is shutting down…',
+    'shutdown.banner.detail': 'The instance is exiting; the page will not hear from it again.',
+    'shutdown.banner.closedTitle': 'Instance closed',
+    'shutdown.banner.closedDetail': 'You can close this page now. To start it again, launch DSH from the launcher or a terminal.',
+    'shutdown.banner.closedHint': 'Just close this browser tab — browsers do not let a page close itself.',
+    'shutdown.dialog.title': 'Shut down DSH?',
+    'shutdown.dialog.body': 'This stops the whole DSH process: running tasks, sessions, and their background jobs are all interrupted. It does not restart on its own — start it again from the launcher or a terminal. When the launcher has lost track of this instance (after a hot restart, for example), this is the only way to close it down.',
+    'shutdown.dialog.ack': 'I understand a shutdown interrupts running tasks and does not restart on its own',
+    'shutdown.dialog.confirm': 'Shut down DSH',
+    'shutdown.dialog.working': 'Shutting down…',
+    'shutdown.dialog.failedTitle': 'The instance could not be closed',
+    'shutdown.dialog.failedBody': 'The shutdown request did not succeed, so the instance is most likely still running. You can retry, or close this dialog for now.',
+    'shutdown.dialog.retry': 'Retry',
+    'shutdown.dialog.close': 'Close dialog',
+    'shutdown.blockers': 'These will be interrupted as well',
+    'error.SHUTDOWN_DENIED': 'This shutdown was refused',
+    'error.SHUTDOWN_UNSUPPORTED': 'This deployment cannot be shut down: the host provides no way to exit the process (appExit)',
+    'error.SHUTDOWN_IN_PROGRESS': 'A restart or shutdown is already in progress; wait for it to finish',
+    'error.SHUTDOWN_FAILED': 'The instance could not be closed',
+    'error.SHUTDOWN_REQUEST_FAILED': 'The shutdown request could not be sent',
+    'error.SHUTDOWN_REQUEST_TIMEOUT': 'The shutdown request got no answer',
   }
 
   /** 运行时拿到的服务与依赖（factory 注入）。 */
@@ -658,6 +769,11 @@
     window.dispatchEvent(new CustomEvent(RESTART_REQUEST_EVENT))
   }
 
+  /** 同上，但叫起来的是「关闭 DSH」那个确认弹窗（同一个宿主、同一条 overlay 注册）。 */
+  function requestShutdownDialog() {
+    window.dispatchEvent(new CustomEvent(SHUTDOWN_REQUEST_EVENT))
+  }
+
   // ---------------------------------------------------------------------------
   // 热重启：纯状态机 + 一份模块级状态
   // ---------------------------------------------------------------------------
@@ -682,10 +798,19 @@
       failures: 0,
       /** `{ code, message }`；只有「提交被拒」「超时失败」会写它。 */
       error: null,
+      /**
+       * 关闭流程自己的失败原因。
+       *
+       * ⚠️ 与 `error` **分开**：两个流程共用一台态机，若共用一个字段，一次「关不掉」
+       * 会被画到重启那一行下面——两行文案说的就不是同一件事了。
+       */
+      shutdownError: null,
+      /** 关闭请求被接受（202）的时刻；`null` 表示还没被接受过。 */
+      shutdownAcceptedAt: null,
     }
   }
 
-  /** 是否处于「已经提交出去、还没落定」的阶段。 */
+  /** 是否处于「已经提交出去、还没落定」的重启阶段。 */
   function isRestartBusy(phase) {
     return RESTART_BUSY_PHASES.includes(phase)
   }
@@ -693,6 +818,26 @@
   /** 是否处于「靠轮询等新进程」的阶段。 */
   function isRestartWatching(phase) {
     return RESTART_WATCH_PHASES.includes(phase)
+  }
+
+  /** 是否是关闭流程的阶段（`idle` 两边共用，不算）。 */
+  function isShutdownPhase(phase) {
+    return SHUTDOWN_PHASES.includes(phase)
+  }
+
+  /** 关闭流程已经提交出去、还没落定（含 `closed`）。 */
+  function isShutdownBusy(phase) {
+    return SHUTDOWN_BUSY_PHASES.includes(phase)
+  }
+
+  /** 关闭流程占着界面（含「等你确认」）：此时不允许再发起重启。 */
+  function isShutdownActive(phase) {
+    return SHUTDOWN_ACTIVE_PHASES.includes(phase)
+  }
+
+  /** 重启流程占着界面（含「等你确认」）：此时不允许再发起关闭。 */
+  function isRestartActive(phase) {
+    return RESTART_ACTIVE_PHASES.includes(phase)
   }
 
   /**
@@ -725,7 +870,7 @@
   /** 兜住任何形状不对的状态：态机宁可从头开始，也不在坏数据上做判断。 */
   function normalizeRestartState(state) {
     if (state === null || typeof state !== 'object') return initialRestartState()
-    if (!RESTART_PHASES.includes(state.phase)) return initialRestartState()
+    if (!CONTROL_PHASES.includes(state.phase)) return initialRestartState()
     return state
   }
 
@@ -798,12 +943,115 @@
     return { ...current, phase, failures, waitMs: waitMs ?? current.waitMs, error: null }
   }
 
+  /** 事件里的失败原因 → `{ code, message }`；没有宿主错误码就用调用方给的兜底码。 */
+  function failureFromEvent(event, fallbackCode) {
+    return {
+      // 没有宿主错误码（请求根本没发出去 / 网络断开）时也必须给一个**本流程自己的**兜底码，
+      // 否则 `describeError` 会落进 `error.generic`，把「关闭没发出去」说成「删除失败」。
+      code: typeof event?.code === 'string' && event.code !== '' ? event.code : fallbackCode,
+      message: typeof event?.message === 'string' ? event.message : '',
+    }
+  }
+
+  /** 关闭流程的事件名：这一组事件走 `nextShutdownPhase`，不经过重启那一套。 */
+  const SHUTDOWN_EVENTS = [
+    'shutdown-confirm', 'shutdown-cancel', 'shutdown-submit', 'shutdown-accepted',
+    'shutdown-rejected', 'shutdown-request-timeout', 'shutdown-retry', 'shutdown-elapsed',
+    'shutdown-dismiss',
+  ]
+
+  /**
+   * 关闭流程的状态迁移（与重启**共用同一个状态对象**，见 `nextRestartPhase`）。
+   *
+   * 与热重启刻意不同的四条语义：
+   *  · 202 之后**不再指望服务端**：立刻进 `closing`，此后状态请求失败是预期，不写错误；
+   *  · `closing → closed` 由时间推动（线上是 `SHUTDOWN_CLOSED_AFTER_MS` 定时器发来的
+   *    `shutdown-elapsed`）——服务端已经不在，没有别的信号可用；
+   *  · 被拒（403 / 409 / 500 / 501）**不进 closing**，原因留在弹窗里，用户可以再试；
+   *  · 请求长时间没有回应 ⇒ `shutdown-failed`，弹窗改成「重试 / 关闭弹窗」，不无限转圈。
+   *
+   * 约定与重启一致：**无效事件返回原对象**（引用相等），调用方据此跳过广播与重渲染。
+   *
+   * @param {object} current 当前状态（`initialRestartState()` 的形状）。
+   * @param {{ type: string, at?: number, code?: string, message?: string, payload?: object }} event 事件。
+   * @returns {object} 下一个状态；无效事件原样返回。
+   */
+  function nextShutdownPhase(current, event) {
+    const type = event?.type
+    const at = eventTime(event)
+    switch (type) {
+      case 'reset':
+        return initialRestartState()
+      case 'shutdown-confirm':
+        // 重启或关闭已经占着界面就不开新弹窗（按钮也会禁用，这里是第二道门）。
+        if (isRestartActive(current.phase) || isShutdownActive(current.phase)) return current
+        return { ...current, phase: 'shutdown-confirming', shutdownError: null, shutdownAcceptedAt: null }
+      case 'shutdown-cancel':
+        // 只有「等待确认」能取消：提交出去之后取消它等于对用户撒谎。
+        if (current.phase !== 'shutdown-confirming') return current
+        return { ...current, phase: 'idle', shutdownError: null }
+      case 'shutdown-submit':
+        // 只有「确认中」才能提交：重复提交（在飞 / 已接受）一律原样返回。
+        if (current.phase !== 'shutdown-confirming') return current
+        return { ...current, phase: 'shutdown-requested', shutdownAcceptedAt: null, shutdownError: null }
+      case 'shutdown-accepted':
+        // 202 ⇒ 立刻进 closing。迟到的 202（例如已经判过超时）不改阶段。
+        if (current.phase !== 'shutdown-requested') return current
+        return { ...current, phase: 'closing', shutdownAcceptedAt: at, shutdownError: null }
+      case 'shutdown-rejected':
+        // 被拒不等于「关掉了」：宿主还好好的，原因留在弹窗里，用户可以直接再试。
+        if (current.phase !== 'shutdown-requested') return current
+        return {
+          ...current,
+          phase: 'shutdown-confirming',
+          shutdownAcceptedAt: null,
+          shutdownError: failureFromEvent(event, 'SHUTDOWN_REQUEST_FAILED'),
+        }
+      case 'shutdown-request-timeout':
+        // 长时间没有回应：落定成可重试的失败态（弹窗仍然在，给「重试」与「关闭弹窗」）。
+        if (current.phase !== 'shutdown-requested') return current
+        return {
+          ...current,
+          phase: 'shutdown-failed',
+          shutdownError: {
+            code: 'SHUTDOWN_REQUEST_TIMEOUT',
+            message: `等了 ${SHUTDOWN_REQUEST_TIMEOUT_MS / 1000} 秒`,
+          },
+        }
+      case 'shutdown-retry':
+        // 「重试」直接再发一次：不让用户重新勾一遍确认（勾选状态还在弹窗里）。
+        if (current.phase !== 'shutdown-failed') return current
+        return { ...current, phase: 'shutdown-requested', shutdownError: null }
+      case 'shutdown-elapsed':
+        if (current.phase !== 'closing') return current
+        return { ...current, phase: 'closed' }
+      case 'shutdown-dismiss':
+        // 只有「关不掉」能关掉弹窗；`closed` 的横幅不可关（那是页面仅剩的信息）。
+        if (current.phase !== 'shutdown-failed') return current
+        return { ...current, phase: 'idle', shutdownError: null }
+      case 'status':
+        // 关闭流程里只刷新展示数据：bootId 变了也不改阶段（那多半是别人重启的），
+        // 「已关闭」这条线由时间说了算。
+        if (event?.payload === null || typeof event?.payload !== 'object') return current
+        return { ...current, status: event.payload }
+      case 'status-failed':
+        // ★ 预期之内：提交关闭之后 HTTP 必然不通，这不是错误，绝不渲染成红色失败。
+        return current
+      default:
+        return current
+    }
+  }
+
   /**
    * 重启进度的纯状态机（唯一定义「现在处于哪个阶段」的地方）。
    *
    * 输入只有两类事实：`/restart/status` 的响应（`status`）与状态请求失败（`status-failed`）；
    * 其余事件来自界面（打开 / 取消 / 提交 / 关掉失败提示）与 POST 的结果（`accepted` / `rejected`）。
    * 放在组件外面，是为了能离线把每条迁移都测一遍——真机上「重启中」只有几秒，人眼测不出死角。
+   *
+   * 关闭实例走同一台机器的子态机（`nextShutdownPhase`），**共用同一个状态对象**：
+   * 一个 `phase` 字段同时只能属于一条流程，「两个流程互斥」因此是结构上成立的，
+   * 不靠额外的布尔标志位（那种标志位一旦忘了清就会互相压住）。
    *
    * 约定：**无效事件返回原对象**（引用相等），调用方据此跳过广播与重渲染。例如重启进行中
    * 再点一次提交，阶段不会倒退——这也是「不允许重复提交」的第二道门（第一道是按钮禁用）。
@@ -815,6 +1063,10 @@
   function nextRestartPhase(state, event) {
     const current = normalizeRestartState(state)
     const type = event?.type
+    // 阶段在关闭流程里、或者事件本身就是关闭的（从 idle / 重启终态进入）：交给子态机。
+    if (isShutdownPhase(current.phase) || SHUTDOWN_EVENTS.includes(type)) {
+      return nextShutdownPhase(current, event)
+    }
     const at = eventTime(event)
     switch (type) {
       case 'reset':
@@ -853,12 +1105,9 @@
           acceptedAt: null,
           waitMs: 0,
           failures: 0,
-          error: {
-            // 没有宿主错误码（请求根本没发出去）也要给一个**重启自己的**兜底码，
-            // 否则 `describeError` 会落进 `error.generic`，把「重启没发出去」说成「删除失败」。
-            code: typeof event?.code === 'string' && event.code !== '' ? event.code : 'RESTART_REQUEST_FAILED',
-            message: typeof event?.message === 'string' ? event.message : '',
-          },
+          // 兜底码是**重启自己的**：否则 `describeError` 会落进 `error.generic`，
+          // 把「重启没发出去」说成「删除失败」。
+          error: failureFromEvent(event, 'RESTART_REQUEST_FAILED'),
         }
       case 'status':
         return restartAfterStatus(current, event)
@@ -922,6 +1171,37 @@
     return `${t('restart.banner.wait')} ${seconds} ${t('restart.unit.second')}`
   }
 
+  /** 关闭阶段 → 一句话（横幅与设置页共用）。`idle` 与重启阶段返回空串。 */
+  function describeShutdownPhase(state, t = translate) {
+    switch (state?.phase) {
+      case 'shutdown-confirming': return t('shutdown.phase.confirming')
+      case 'shutdown-requested': return t('shutdown.phase.requested')
+      case 'closing': return t('shutdown.phase.closing')
+      case 'closed': return t('shutdown.phase.closed')
+      case 'shutdown-failed': return t('shutdown.phase.failed')
+      default: return ''
+    }
+  }
+
+  /**
+   * 关闭流程的错误码 → 能读懂的一句话。
+   *
+   * 与 `describeError` 的两点不同，都是为了「不把关闭说成别的事」：
+   *  · 宿主对「已经在关闭中 / 已经有一次重启在飞」复用 `RESTART_IN_PROGRESS`，
+   *    在关闭流程里要说成「重启或关闭正在进行中」，不能说成「重启」；
+   *  · 认不出的码一律落到**关闭自己的**兜底文案，绝不落进 `error.generic`（那句是「删除失败」）。
+   */
+  function describeShutdownError(error) {
+    const code = error?.code
+    if (typeof code === 'string' && code !== '') {
+      const key = code === 'RESTART_IN_PROGRESS' ? 'error.SHUTDOWN_IN_PROGRESS' : `error.${code}`
+      const text = translate(key)
+      if (text !== key) return error?.message ? `${text}（${error.message}）` : text
+    }
+    const fallback = translate('error.SHUTDOWN_FAILED')
+    return error?.message ? `${fallback}：${error.message}` : fallback
+  }
+
   /** 设置页导航里的页签名（thunk：每次投影时现读，跟着语言走）。取不到也不让导航崩。 */
   function restartSectionLabel() {
     try {
@@ -954,6 +1234,18 @@
     const lines = describeRestartBlockers(status, t)
     if (lines.length === 0) return null
     return `${t('restart.blockersDesc')}（${lines.join('；')}）`
+  }
+
+  /**
+   * 阻塞项 → 关闭弹窗里的一句话；没有阻塞项返回 null。
+   *
+   * ⚠️ 与重启**刻意不同**：阻塞项不阻止关闭（那正是这个按钮存在的理由——实例还在跑着，
+   * 但启动器已经失去跟踪、停不掉它），所以这里只说「这些会被一起中断」，不写成拒绝理由。
+   */
+  function shutdownBlockerSummary(status, t = translate) {
+    const lines = describeRestartBlockers(status, t)
+    if (lines.length === 0) return null
+    return `${t('shutdown.blockers')}（${lines.join('；')}）`
   }
 
   /** 重启来源：模型 / 用户；未知值原样显示（不编造，AGENTS 坑 ⑨）。 */
@@ -997,7 +1289,8 @@
   /**
    * 态机的唯一入口。
    *
-   * 顺带管两件事：进入「等新进程」时开轮询、离开时关掉；阶段变化时广播一次。
+   * 顺带管三件事：进入「等新进程」时开轮询、离开时关掉；关闭流程的定时器跟着阶段排 / 清；
+   * 阶段变化时广播一次。
    */
   function dispatchRestart(event) {
     const previous = restartState
@@ -1007,6 +1300,7 @@
     restartState = next
     if (isRestartWatching(next.phase)) ensureRestartPolling()
     else stopRestartPolling()
+    syncShutdownTimers(previous, next)
     broadcastRestartState(next)
     if (next.phase === 'done' && previous.phase !== 'done') {
       // 刚落定时再问一次：把新进程的 pid / bootId / 「最后一次重启」刷新到界面上。
@@ -1034,6 +1328,50 @@
     if (restartPollTimer === undefined) return
     window.clearInterval?.(restartPollTimer)
     restartPollTimer = undefined
+  }
+
+  /**
+   * 关闭流程的两个定时器句柄。
+   *
+   * 离线测试的 `window` 替身没有定时器（和 `restartPollTimer` 同一个约定），
+   * 所以取不到就**不排**——状态停在那里等测试自己发事件，不会假装时间过去了。
+   */
+  let shutdownRequestTimer
+  let shutdownCloseTimer
+
+  function clearShutdownTimer(kind) {
+    const timer = kind === 'request' ? shutdownRequestTimer : shutdownCloseTimer
+    if (timer === undefined) return
+    window.clearTimeout?.(timer)
+    if (kind === 'request') shutdownRequestTimer = undefined
+    else shutdownCloseTimer = undefined
+  }
+
+  /**
+   * 按阶段排 / 清关闭流程的定时器。
+   *
+   * 只在**阶段变化**时动它们：同一阶段里的 `status` 事件只刷新展示数据，
+   * 不能把「等宿主回答」或「等它退出」的计时重新开始。
+   *
+   * @param {object} previous 变化前的状态。
+   * @param {object} next 变化后的状态。
+   */
+  function syncShutdownTimers(previous, next) {
+    if (previous.phase === next.phase) return
+    clearShutdownTimer('request')
+    clearShutdownTimer('close')
+    if (typeof window.setTimeout !== 'function') return
+    if (next.phase === 'shutdown-requested') {
+      // 宿主迟迟不回答也不能让人对着一个转圈的弹窗干等：到点落定成可重试的失败态。
+      shutdownRequestTimer = window.setTimeout(() => {
+        dispatchRestart({ type: 'shutdown-request-timeout', at: Date.now() })
+      }, SHUTDOWN_REQUEST_TIMEOUT_MS)
+    } else if (next.phase === 'closing') {
+      // 202 之后服务端随时会消失，没有任何可用信号，只能靠等待时长说「已关闭」。
+      shutdownCloseTimer = window.setTimeout(() => {
+        dispatchRestart({ type: 'shutdown-elapsed', at: Date.now() })
+      }, SHUTDOWN_CLOSED_AFTER_MS)
+    }
   }
 
   /**
@@ -1109,6 +1447,50 @@
     } catch {
       // 没有 location（离线替身）时什么都不做：横幅仍然给出「请手动启动」的提示。
     }
+  }
+
+  /**
+   * 把关闭请求发给宿主（提交与重试共用）。
+   *
+   * 202 ⇒ **立刻**进 `closing`（从这一刻起页面不再指望服务端）。
+   * 被拒（403 / 409 / 500 / 501）⇒ 带上宿主给的码与原因退回「确认中」，弹窗留着。
+   * 请求根本没发出去 ⇒ 兜底码 `SHUTDOWN_REQUEST_FAILED`（绝不让它落进删除的文案）。
+   */
+  async function sendShutdownRequest() {
+    try {
+      await callHost(API.shutdown, {
+        method: 'POST',
+        // 与 POST /restart 同一道可信校验（`x-dsh-agent-control: 1` 是同源之外的第二种凭据）。
+        headers: { 'content-type': 'application/json', 'x-dsh-agent-control': '1' },
+        body: JSON.stringify({}),
+      })
+      dispatchRestart({ type: 'shutdown-accepted', at: Date.now() })
+    } catch (failure) {
+      dispatchRestart({
+        type: 'shutdown-rejected',
+        code: typeof failure?.code === 'string' && failure.code !== '' ? failure.code : 'SHUTDOWN_REQUEST_FAILED',
+        message: failure?.message,
+        at: Date.now(),
+      })
+    }
+  }
+
+  /**
+   * 提交关闭请求（用户侧唯一入口）。
+   *
+   * 第二道门：只有真的在「确认中」才发请求（按钮禁用是第一道）。
+   */
+  async function submitShutdown() {
+    if (restartSnapshot().phase !== 'shutdown-confirming') return
+    dispatchRestart({ type: 'shutdown-submit' })
+    await sendShutdownRequest()
+  }
+
+  /** 「重试」：从「关不掉」直接再发一次，不让用户重新勾一遍确认。 */
+  async function retryShutdown() {
+    if (restartSnapshot().phase !== 'shutdown-failed') return
+    dispatchRestart({ type: 'shutdown-retry' })
+    await sendShutdownRequest()
   }
 
   /**
@@ -1237,13 +1619,17 @@
       }
 
       // ③ 主按钮（危险态）：重启期间禁用并显示进度，不允许重复提交
-      const note = busy
-        ? `${describeRestartPhase(state)} · ${describeRestartWait(state)}`
-        : phase === 'done'
-          ? t('restart.doneNote')
-          : phase === 'failed'
-            ? t('restart.failedNote')
-            : unsupportedReason ?? (canRestart ? t('restart.actionDesc') : t('restart.unsupported'))
+      const shutdownActive = isShutdownActive(phase)
+      const note = shutdownActive
+        // 关闭流程占着界面时重启按钮是禁用的，这里说清为什么（否则是个没解释的灰按钮）。
+        ? t('shutdown.busyHint')
+        : busy
+          ? `${describeRestartPhase(state)} · ${describeRestartWait(state)}`
+          : phase === 'done'
+            ? t('restart.doneNote')
+            : phase === 'failed'
+              ? t('restart.failedNote')
+              : unsupportedReason ?? (canRestart ? t('restart.actionDesc') : t('restart.unsupported'))
       const actions = []
       if (phase === 'failed') {
         // 超时失败的人工入口（横幅在设置面板后面看不见，这里再给一个）。
@@ -1259,7 +1645,8 @@
         key: 'restart',
         variant: 'primary',
         className: DANGER_CLASS,
-        disabled: busy || !canRestart,
+        // 与关闭流程互斥：任一流程占着界面时，另一个按钮禁用（第二道门在态机里）。
+        disabled: busy || shutdownActive || !canRestart,
         onClick: requestRestartDialog,
         icon: restartIcon(),
         children: busy ? t('restart.actionBusy') : t('restart.action'),
@@ -1277,6 +1664,55 @@
             : null,
         ),
         react.createElement('div', { className: ACTIONS_CLASS }, ...actions),
+      ))
+
+      // ③′ 关闭实例（危险态）：整个 DSH 进程的收尾入口，就在「重启 DSH」下面一行，
+      //     与它同结构同度量（ROW_CLASS 自带同一条分隔线）。
+      const shutdownBusy = isShutdownBusy(phase)
+      /**
+       * 关闭请求已经提交、还没落定：只有这段时间按钮显示进度。
+       *
+       * `closed` 也在 `SHUTDOWN_BUSY_PHASES` 里（那里说的是「不能再提交」），但落定之后
+       * 按钮不该继续说「正在关闭…」——横幅已经在说「实例已关闭」了。
+       */
+      const shutdownInFlight = phase === 'shutdown-requested' || phase === 'closing'
+      const canShutdown = status?.canShutdown !== false
+      // 宿主对「关不掉」只给布尔 `canShutdown`，没有关闭专用的原因字段。原因就用
+      // `unsupportedReason`：`canShutdown === false` 只有一个来源——拿不到 `appExit`，
+      // 而重启预检的第一条判据就是它，所以那句话说的正是这里缺的那个能力。
+      const shutdownReason = typeof status?.unsupportedReason === 'string' && status.unsupportedReason !== ''
+        ? status.unsupportedReason
+        : null
+      const shutdownNote = isShutdownPhase(phase)
+        ? describeShutdownPhase(state)
+        : canShutdown
+          ? t('shutdown.actionDesc')
+          : shutdownReason ?? t('shutdown.unsupported')
+      rows.push(react.createElement(
+        'div',
+        { className: ROW_CLASS, key: 'shutdown' },
+        react.createElement(
+          'div',
+          { className: ROW_MAIN_CLASS },
+          react.createElement('div', { className: ROW_TITLE_CLASS }, t('shutdown.title')),
+          react.createElement('div', { className: ROW_DESC_CLASS }, shutdownNote),
+          isShutdownPhase(phase) && state.shutdownError !== null
+            ? react.createElement('div', { className: ERROR_CLASS }, describeShutdownError(state.shutdownError))
+            : null,
+        ),
+        react.createElement(
+          'div',
+          { className: ACTIONS_CLASS },
+          renderButton({
+            key: 'shutdown',
+            variant: 'primary',
+            className: DANGER_CLASS,
+            // 与重启流程互斥；`canShutdown === false` 是宿主说了算（读不到时不预先禁用）。
+            disabled: shutdownBusy || isRestartActive(phase) || !canShutdown,
+            onClick: requestShutdownDialog,
+            children: shutdownInFlight ? t('shutdown.actionBusy') : t('shutdown.action'),
+          }),
+        ),
       ))
 
       // ④ 最近一次重启：时间、来源、原因、耗时、续作结果
@@ -1483,9 +1919,9 @@
     /**
      * `shell.overlay` 里**唯一**的弹窗宿主。
      *
-     * 两类确认（删除 / 重启）走同一个事件模式、同一个宿主：按钮只派发 `…:request-*`，
+     * 三类确认（删除 / 重启 / 关闭）走同一个事件模式、同一个宿主：按钮只派发 `…:request-*`，
      * 这里统一监听并渲染，所以永远不会出现两个弹窗同时响应，也没有第二个 overlay 槽位注册。
-     * 重启期间的**非阻塞横幅**也挂在同一条注册上——它在设置面板关着时也得看得见。
+     * 重启与关闭期间的**非阻塞横幅**也挂在同一条注册上——它在设置面板关着时也得看得见。
      */
     const OverlayDialogs = (props) => {
       const t = props.t ?? translate
@@ -1495,6 +1931,7 @@
       const [resolving, setResolving] = useState(false)
       const [error, setError] = useState(null)
       const [restartAcknowledged, setRestartAcknowledged] = useState(false)
+      const [shutdownAcknowledged, setShutdownAcknowledged] = useState(false)
       const restart = useRestartState()
       const status = restart.status
 
@@ -1512,8 +1949,14 @@
           setRestartAcknowledged(false)
           dispatchRestart({ type: 'confirm' })
         }
+        const onShutdownRequest = () => {
+          // 同上：每次重新问一遍勾选；被拒或「关不掉」之后阶段还在关闭流程里，原因看得见。
+          setShutdownAcknowledged(false)
+          dispatchRestart({ type: 'shutdown-confirm' })
+        }
         window.addEventListener(REQUEST_EVENT, onRequest)
         window.addEventListener(RESTART_REQUEST_EVENT, onRestartRequest)
+        window.addEventListener(SHUTDOWN_REQUEST_EVENT, onShutdownRequest)
         // 播种一次状态：模型发起的重启不需要用户先打开设置页就能被横幅看见。
         if (!restartStatusSeeded) {
           restartStatusSeeded = true
@@ -1522,6 +1965,7 @@
         return () => {
           window.removeEventListener(REQUEST_EVENT, onRequest)
           window.removeEventListener(RESTART_REQUEST_EVENT, onRestartRequest)
+          window.removeEventListener(SHUTDOWN_REQUEST_EVENT, onShutdownRequest)
         }
       }, [])
 
@@ -1665,12 +2109,104 @@
         )
       }
 
+      /**
+       * 关闭确认（复用同一个宿主、同一个原生 `RiskConfirmation`）。
+       *
+       * 三种形态：
+       *  · `shutdown-confirming` —— 正文 + 阻塞项 + （被拒时的）宿主原因，勾选后才能确认；
+       *  · `shutdown-requested` —— 请求在飞：显示进度并禁用，不允许重复提交、也不允许取消；
+       *  · `shutdown-failed`    —— 关不掉（超时 / 网络错误）：给「重试」与「关闭弹窗」，不无限转圈。
+       */
+      const renderShutdownConfirm = () => {
+        const phase = restart.phase
+        if (!isShutdownPhase(phase)) return null
+        const submitting = phase === 'shutdown-requested'
+
+        if (phase === 'shutdown-failed') {
+          const failedLines = [t('shutdown.dialog.failedBody')]
+          if (restart.shutdownError !== null) failedLines.push(`⚠ ${describeShutdownError(restart.shutdownError)}`)
+          return react.createElement(RiskConfirmation, {
+            open: true,
+            title: t('shutdown.dialog.failedTitle'),
+            description: failedLines.join('\n\n'),
+            acknowledgeLabel: t('shutdown.dialog.ack'),
+            cancelLabel: t('shutdown.dialog.close'),
+            closeLabel: t('shutdown.dialog.close'),
+            confirmLabel: t('shutdown.dialog.retry'),
+            // 失败之前用户已经勾过一次；这里保持那次勾选，「重试」立刻可点。
+            acknowledged: shutdownAcknowledged,
+            onAcknowledgedChange: setShutdownAcknowledged,
+            onCancel: () => { dispatchRestart({ type: 'shutdown-dismiss' }) },
+            onConfirm: () => { void retryShutdown() },
+          })
+        }
+
+        const lines = [t('shutdown.dialog.body')]
+        const blockers = shutdownBlockerSummary(status, t)
+        if (blockers !== null) lines.push(blockers)
+        if (restart.shutdownError !== null) lines.push(`⚠ ${describeShutdownError(restart.shutdownError)}`)
+        return react.createElement(RiskConfirmation, {
+          open: true,
+          title: t('shutdown.dialog.title'),
+          description: lines.join('\n\n'),
+          acknowledgeLabel: t('shutdown.dialog.ack'),
+          cancelLabel: t('dialog.cancel'),
+          closeLabel: t('dialog.close'),
+          confirmLabel: submitting ? t('shutdown.dialog.working') : t('shutdown.dialog.confirm'),
+          acknowledged: shutdownAcknowledged,
+          disabled: submitting,
+          onAcknowledgedChange: setShutdownAcknowledged,
+          // 提交中不允许取消（态机里也拦一次，两道门）。
+          onCancel: () => { dispatchRestart({ type: 'shutdown-cancel' }) },
+          onConfirm: () => { void submitShutdown() },
+        })
+      }
+
+      /**
+       * 关闭进度横幅（非阻塞）。
+       *
+       * 202 之后页面就不再指望服务端，所以这里**什么都不做**，只如实说清现在到哪一步了：
+       * 不自动刷新页面，也不调 `window.close()`（浏览器多半不允许，而且那会替用户决定
+       * 「谁来关这个页面」）。到 `closed` 只给一句提示。
+       */
+      const renderShutdownBanner = () => {
+        const phase = restart.phase
+        if (phase !== 'closing' && phase !== 'closed') return null
+        const closed = phase === 'closed'
+        const children = [
+          react.createElement('span', { className: BANNER_TITLE_CLASS, key: 'title' },
+            closed ? t('shutdown.banner.closedTitle') : t('shutdown.banner.title')),
+          react.createElement('span', { className: BANNER_DETAIL_CLASS, key: 'detail' },
+            closed ? t('shutdown.banner.closedDetail') : t('shutdown.banner.detail')),
+        ]
+        if (closed) {
+          children.push(react.createElement('span', { className: HINT_CLASS, key: 'hint' },
+            t('shutdown.banner.closedHint')))
+        }
+        return react.createElement(
+          'div',
+          { className: BANNER_CLASS, role: 'status', 'aria-live': 'polite' },
+          react.createElement('div', { className: BANNER_CARD_CLASS }, ...children),
+        )
+      }
+
       const banner = renderRestartBanner()
+      const shutdownBanner = renderShutdownBanner()
       const restartConfirm = renderRestartConfirm()
+      const shutdownConfirm = renderShutdownConfirm()
       const deleteConfirm = renderDeleteConfirm()
       // 什么都没有时返回 null：槽位在「没事发生」时不该往页面上放节点。
-      if (banner === null && restartConfirm === null && deleteConfirm === null) return null
-      return react.createElement(react.Fragment, null, banner, restartConfirm, deleteConfirm)
+      if (banner === null && shutdownBanner === null && restartConfirm === null
+        && shutdownConfirm === null && deleteConfirm === null) return null
+      return react.createElement(
+        react.Fragment,
+        null,
+        banner,
+        shutdownBanner,
+        restartConfirm,
+        shutdownConfirm,
+        deleteConfirm,
+      )
     }
 
     return { SessionMenuDelete, TurnDeleteAction, DeletedTurnMarker, RestartSection, OverlayDialogs }
@@ -2131,6 +2667,18 @@
       poll: pollRestartStatus,
       submit: submitRestart,
       describeBlockerLines: (status) => describeRestartBlockers(status),
+      // 关闭实例：同一台态机、同一个状态对象（阶段名与重启的不会撞）。
+      shutdownPhases: SHUTDOWN_PHASES,
+      shutdownConstants: {
+        requestTimeoutMs: SHUTDOWN_REQUEST_TIMEOUT_MS,
+        closedAfterMs: SHUTDOWN_CLOSED_AFTER_MS,
+      },
+      submitShutdown,
+      retryShutdown,
+      /** 关闭流程是否占着界面（含「等你确认」）；不传就看当前状态。 */
+      isShutdownActive: (phase) => isShutdownActive(phase ?? restartState.phase),
+      /** 重启流程是否占着界面（含「等你确认」）；不传就看当前状态。 */
+      isRestartActive: (phase) => isRestartActive(phase ?? restartState.phase),
     },
   }
 })()
