@@ -68,11 +68,11 @@
 node test/restart.test.mjs          54 / 54 pass
 node test/restart-helper.test.mjs   22 / 22 pass
 node test/host.test.mjs             44 / 44 pass
-node test/client.test.mjs           53 / 53 pass
+node test/client.test.mjs           54 / 54 pass
 node test/turn-delete.test.mjs      25 / 25 pass
 node test/session-delete.test.mjs   23 / 23 pass
                                     ─────────────
-                                    221 项全绿
+                                    222 项全绿
 ```
 
 `npm test` 里的 `node --check` 覆盖 17 个 `.mjs`/`.js` 文件（本机沙箱下 `node --test` 那一步会 `spawn EPERM` 假失败，所以测试逐个直跑，见 AGENTS.md 第 5 节）。

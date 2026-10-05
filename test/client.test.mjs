@@ -13,6 +13,7 @@
  * 会当场抛出来。
  */
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
@@ -2433,5 +2434,29 @@ test('拿不到原生原语时关闭行照常工作：两个危险按钮都退�
     globalThis.window.__ModuleLoader__ = originalLoader
     globalThis.window.__dshAgentControl = originalExpose
   }
+})
+
+test('键值网格的值列必须封顶、标签不许折行（长原因会撑爆版式）', () => {
+  // 这条是**源码钉子**，不是渲染测试：真机截图暴露过一次——模型写的「原因」可以有 300 字，
+  // `grid-template-columns:max-content max-content` + `flex:none` 会让网格撑到内容那么宽，
+  // 于是左侧标题被压成一字一行、面板底部出现横向滚动条。谁改回 max-content 都要先看到这条。
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+
+  assert.match(
+    source,
+    /grid-template-columns:max-content minmax\(0,320px\)/,
+    '★ 值列要封顶：minmax(0,320px) 在 shrink-to-fit 下等于 min(内容宽度, 320px)',
+  )
+  // 注意：类名在源码里是模板表达式（`${KV_KEY_CLASS}`），不是字面量——针要扎在源码形状上。
+  assert.match(
+    source,
+    /KV_KEY_CLASS\}\{[^}]*white-space:nowrap/,
+    '★ 标签永不折行——竖排的「最/近/一/次/重/启」就是它被压窄的证据',
+  )
+  assert.doesNotMatch(
+    source,
+    /grid-template-columns:max-content max-content/,
+    '★ 不许退回两个 max-content（真机踩过）',
+  )
 })
 

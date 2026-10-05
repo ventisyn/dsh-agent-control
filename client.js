@@ -243,9 +243,14 @@
     `.${ROW_TITLE_CLASS}{font-size:14px;line-height:20px}`,
     `.${ROW_DESC_CLASS}{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);`
       + 'overflow-wrap:anywhere}',
-    `.${KV_CLASS}{display:grid;grid-template-columns:max-content max-content;column-gap:12px;`
+    // ⚠️ 值列**必须封顶**（`minmax(0,320px)`），不能用 `max-content`：模型写的原因可以有 300 字、
+    //    日志路径也很长，`max-content` 会让整个网格撑到内容那么宽（`flex:none` 更让它拒绝收缩），
+    //    于是左边的标题被挤成一字一行、面板底部出现横向滚动条（真机截图踩到过）。
+    //    `minmax(0,320px)` 在 shrink-to-fit 下等于 min(内容宽度, 320px)：短的照旧贴着，长的换行。
+    `.${KV_CLASS}{display:grid;grid-template-columns:max-content minmax(0,320px);column-gap:12px;`
       + 'row-gap:2px;flex:none;font-size:12px;line-height:18px}',
-    `.${KV_KEY_CLASS}{color:var(--dsw-alias-label-tertiary)}`,
+    // 标签永不折行：竖排的「最/近/一/次/重/启」就是它被压窄的证据。
+    `.${KV_KEY_CLASS}{color:var(--dsw-alias-label-tertiary);white-space:nowrap}`,
     `.${KV_VALUE_CLASS}{color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;`
       + 'overflow-wrap:anywhere}',
     `.${BLOCKER_CLASS}{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);`
