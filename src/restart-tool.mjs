@@ -82,9 +82,13 @@ export const RESUME_FALLBACK_MS = 1500
  * 这一段延迟是**必需的**：`ctx.appExit(0)` 会 dispose 整棵树，webServer 的 dispose 里有
  * `server.closeAllConnections()`。先退出再回响应的话，那条 202 会被当场掐断，浏览器只看到网络错误
  * ——而客户端正是靠这个 202 才敢进「正在关闭」状态，掐断了它界面就显示成「关不掉」。
- * 300 ms 足够让响应刷出去（与 M0 原型实测一致的量级）。
+ *
+ * ⚠️ 为什么是 1000 ms 而不是「够刷出响应」的 300 ms：**「发出去」不等于「看得见」**。
+ * 真机反馈：用户点完关闭，300 ms 后进程就没了，浏览器来得及收到 202、却来不及把「正在关闭」画出来
+ * 给人看清（何况页面随即失去连接）。这一秒买的是**人眼能看见的反馈**，代价是实例晚 0.7 秒停——
+ * 用户点的是一个「现在就停」的按钮，多等不到一秒完全可接受。
  */
-export const SHUTDOWN_EXIT_DELAY_MS = 300
+export const SHUTDOWN_EXIT_DELAY_MS = 1000
 
 /** 启动规格文件名（放在重启状态目录里；辅助进程把结果写在同一个目录）。 */
 const SPEC_FILE = 'spec.json'

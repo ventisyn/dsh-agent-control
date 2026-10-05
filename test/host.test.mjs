@@ -831,8 +831,9 @@ test('关闭错误码到 HTTP 状态的映射：403 / 501 / 500；旧码语义�
   assert.equal(statusForCode(ERROR_CODES.deleteFailed), 500)
   assert.equal(statusForCode(ERROR_CODES.sessionLive), 409)
   assert.equal(statusForCode(ERROR_CODES.agentBusy), 423)
-  // 延迟退出的量级：太短会把 202 掐断（closeAllConnections），太长会让界面觉得「关不掉」。
-  assert.equal(SHUTDOWN_EXIT_DELAY_MS >= 300 && SHUTDOWN_EXIT_DELAY_MS <= 500, true, `实际是 ${SHUTDOWN_EXIT_DELAY_MS} ms`)
+  // 延迟退出的量级：太短会把 202 掐断、也来不及让人看见「正在关闭」（真机踩过 300 ms 那次）；
+  // 太长会让界面觉得「关不掉」。
+  assert.equal(SHUTDOWN_EXIT_DELAY_MS >= 800 && SHUTDOWN_EXIT_DELAY_MS <= 2000, true, `实际是 ${SHUTDOWN_EXIT_DELAY_MS} ms`)
 })
 
 test('POST /shutdown：请求头不可信 ⇒ 403 SHUTDOWN_DENIED；content-type 不是 JSON ⇒ 400；都不安排退出', async (t) => {
