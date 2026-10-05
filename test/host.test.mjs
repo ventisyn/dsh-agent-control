@@ -104,11 +104,19 @@ function makeRestartHost(services = {}, options = {}) {
   return { ...host, background, exits, deferred }
 }
 
-/** 驱动关闭实例的「延迟退出」（生产实现是响应之后 300 ms 的 setTimeout）。 */
-function runDeferredExit(host) {
+/**
+ * 驱动关闭实例的「延迟退出」（生产实现是响应之后 300 ms 的 setTimeout）。
+ *
+ * ⚠️ 它是 `async` 的：`exit` 现在会**先尽力 flush** 再请求退出，所以 `appExit` 落在几个微任务之后。
+ * 调用方必须 `await`，否则会在 flush 还没跑完时就去断言 `exits`（那会看到空数组）。
+ */
+async function runDeferredExit(host) {
   const task = host.deferred.shift()
   assert.equal(typeof task, 'function', '关闭必须先安排好一个延迟退出')
   task()
+  // 让 `exit` 内部 await 的 flush 链跑完（都是一次微任务级别的等待，用 setImmediate 兜底）。
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
 }
 
 /** 等一个条件成立（最多 ms 毫秒），返回最后是否成立。用于等真实的定时器。 */
@@ -871,7 +879,7 @@ test('POST /shutdown：空体与 {} 都接受 ⇒ 202；先回响应再退出，
   assert.equal(readPending(restartDir(home)), undefined, '关闭不写任何热重启待办')
   assert.equal(host.warnings.some((line) => /关闭实例/.test(line)), true, '日志要留痕')
 
-  runDeferredExit(host)
+  await runDeferredExit(host)
   assert.deepEqual(host.exits, [0], '★ 恰好一次，且退出码是 0')
 
   // `{}` 也必须接受（界面可能带一个空的 JSON 体）。
@@ -879,8 +887,80 @@ test('POST /shutdown：空体与 {} 都接受 ⇒ 202；先回响应再退出，
   const jsonHost = makeRestartHost()
   const withBody = await call(jsonHost, PATHS.shutdown, { body: '{}' })
   assert.equal(withBody.status, 202)
-  runDeferredExit(jsonHost)
+  await runDeferredExit(jsonHost)
   assert.deepEqual(jsonHost.exits, [0])
+})
+
+test('关闭前先尽力 flush：每个活动会话刷一次，然后才 appExit', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const flushed = []
+  const sessions = [
+    { id: 'session-a', name: 'A' },
+    { id: 'session-b', name: 'B' },
+  ]
+  const host = makeRestartHost({
+    sessions: {
+      list: () => sessions,
+      flush: (session) => {
+        flushed.push(session.id)
+        return Promise.resolve(true)
+      },
+    },
+  })
+
+  const response = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(response.status, 202)
+  assert.deepEqual(flushed, [], '★ 响应之前不刷也不退：先让界面拿到 202')
+
+  await runDeferredExit(host)
+
+  assert.deepEqual(flushed, ['session-a', 'session-b'], '★ 每个活动会话都刷一次')
+  assert.deepEqual(host.exits, [0], '刷完才退出')
+})
+
+test('关闭前的 flush 卡住也不挡退出：到时限照常退（这个按钮的语义是「现在就停」）', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost(
+    {
+      sessions: {
+        list: () => [{ id: 'session-stuck' }],
+        // 永远不 resolve：模拟持久化层卡住。退出**绝不能**被它拖住。
+        flush: () => new Promise(() => {}),
+      },
+    },
+    { host: { shutdownFlushTimeoutMs: 30 } },
+  )
+
+  const response = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(response.status, 202)
+  await runDeferredExit(host)
+
+  assert.equal(await waitFor(() => host.exits.length > 0), true, '★ 卡住的 flush 不能把退出挡在门外')
+  assert.deepEqual(host.exits, [0])
+})
+
+test('关闭前的 flush 抛错也不挡退出（而且不假装刷成功）', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  t.after(() => resetRestartRuntimeForTest())
+  const host = makeRestartHost({
+    sessions: {
+      list: () => [{ id: 'session-boom' }],
+      flush: () => {
+        throw new Error('持久化层炸了')
+      },
+    },
+  })
+
+  const response = await call(host, PATHS.shutdown, { body: '{}' })
+  assert.equal(response.status, 202)
+  await runDeferredExit(host)
+
+  assert.deepEqual(host.exits, [0], '刷不动归刷不动，退出照常')
 })
 
 test('POST /shutdown：宿主没有 appExit ⇒ 501 SHUTDOWN_UNSUPPORTED，不安排退出也不标记关闭中', async (t) => {
@@ -941,7 +1021,7 @@ test('关闭进行中的第二次 POST /shutdown ⇒ 409 RESTART_IN_PROGRESS，�
   assert.equal(host.deferred.length, 1, '★ 不许再安排第二次退出')
   assert.deepEqual(host.exits, [], '退出还没执行：它在响应之后那一拍')
 
-  runDeferredExit(host)
+  await runDeferredExit(host)
   assert.deepEqual(host.exits, [0], '★ 整个关闭过程恰好退出一次')
 })
 
@@ -985,7 +1065,9 @@ test('requestShutdown 的退出动作抛错 ⇒ SHUTDOWN_FAILED（500）并复�
   assert.equal(typeof shutdown.exit, 'function')
   assert.equal(calls, 0, '★ requestShutdown 自己不许调 appExit：响应还没发出去')
 
-  assert.throws(
+  // `exit` 是 async 的（先尽力 flush 再退出），所以失败以 **rejected promise** 的形式出现——
+  // 仍然是「如实报 SHUTDOWN_FAILED」，只是不能再用 assert.throws 同步接。
+  await assert.rejects(
     () => shutdown.exit(),
     (error) => error.code === ERROR_CODES.shutdownFailed
       && error.status === 500
@@ -1017,7 +1099,7 @@ test('路由层退出失败：202 已经发出去了，只能如实记错误日�
   assert.equal(accepted.status, 202)
   assert.deepEqual(calls, [], '响应之前不调 appExit')
 
-  runDeferredExit(host)
+  await runDeferredExit(host)
   assert.deepEqual(calls, [0], '退出动作被调用时传 0')
   assert.equal(host.errors.length, 1, '★ 退出抛错必须留一条 error 日志，绝不假装关掉了')
   assert.match(host.errors[0], /宿主拒绝退出/, '原始信息要原样带出来')
@@ -1025,7 +1107,7 @@ test('路由层退出失败：202 已经发出去了，只能如实记错误日�
   // exit 复原了标记：再点一次会被接受，并且真的再请求一次退出（否则这个实例再也关不掉了）。
   const again = await call(host, PATHS.shutdown, { body: '{}' })
   assert.equal(again.status, 202)
-  runDeferredExit(host)
+  await runDeferredExit(host)
   assert.deepEqual(calls, [0, 0])
 })
 

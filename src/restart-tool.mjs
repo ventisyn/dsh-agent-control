@@ -147,7 +147,7 @@ export function resetRestartRuntimeForTest() {
  * 进程）、`appExit`（退出进程）。测试传 `schedule: () => {}` 就永远不会真的派生进程或退出。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {{ dshHome?: string, config?: any, now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, deferExit?: (fn: () => void) => void, pid?: number, bootId?: string, startedAt?: number, port?: number, isWebApp?: boolean, argv?: string[], helperPath?: string, logFile?: string, statusUrl?: string }} [options] - 覆盖项（测试与特殊部署用）。
+ * @param {{ dshHome?: string, config?: any, now?: () => number, schedule?: (fn: () => void) => void, spawn?: Function, appExit?: Function, deferExit?: (fn: () => void) => void, shutdownFlushTimeoutMs?: number, pid?: number, bootId?: string, startedAt?: number, port?: number, isWebApp?: boolean, argv?: string[], helperPath?: string, logFile?: string, statusUrl?: string }} [options] - 覆盖项（测试与特殊部署用）。
  * @returns {any} deps。
  */
 export function createRestartState(ctx, options = {}) {
@@ -197,6 +197,8 @@ export function createRestartState(ctx, options = {}) {
       : (fn) => {
         setTimeout(fn, SHUTDOWN_EXIT_DELAY_MS)
       },
+    // 关闭前尽力 flush 的时限（只给测试注入用；生产走 SHUTDOWN_FLUSH_TIMEOUT_MS）。
+    ...(Number.isFinite(options.shutdownFlushTimeoutMs) ? { shutdownFlushTimeoutMs: options.shutdownFlushTimeoutMs } : {}),
   }
 
   // 端口相关的三项做成**惰性读取**：`webServer.port` 只有 listen 完成之后才是真实端口
@@ -637,9 +639,15 @@ export async function requestShutdown(ctx, deps) {
 
   // ⑥ 退出动作：调用方才真的退出。它抛错时**绝不假装已经关掉**——复原标记（用户可以再点一次，
   //    或改从启动器/终端停止），并如实抛出 `SHUTDOWN_FAILED`（500）。
+  //
+  //    退出前做一次**尽力而为的 flush**（见 bestEffortFlush）：不等空闲 ≠ 不管已在盘外的事件。
+  //    尾部没有闭合轮次是内核支持的状态（`dsh-session` 的 `interruptedTurnClosers` 会在打开会话时
+  //    补 `step/end` + `turn/end {kind:'interrupted'}`，悬空工具调用还补合成结果），但那说的是
+  //    「日志能读回来」，不是「已经写进磁盘的事件可以丢」——所以先把它们刷下去，再退出。
   return {
     ok: true,
-    exit: () => {
+    exit: async () => {
+      await bestEffortFlush(ctx, deps)
       try {
         appExit(0)
       } catch (error) {
@@ -648,6 +656,50 @@ export async function requestShutdown(ctx, deps) {
       }
     },
   }
+}
+
+/** 关闭前刷新每个活动会话的尽力时限（毫秒）。刷不动也照常退出——这个按钮的语义是「现在就停」。 */
+export const SHUTDOWN_FLUSH_TIMEOUT_MS = 500
+
+/**
+ * 关闭前的**尽力而为** flush：把每个活动会话已经攒在内存里的事件刷到盘上。
+ *
+ * 为什么值得做：`sessions.flush(session)` 返回「是否至少有一个持久化监听器参与」，而轮次删除那边
+ * 已经证实过「flush 不为 true 时事件只在内存里、重启后会复活」——也就是说**确实存在缓冲区**。
+ * 关闭不等空闲（那是热重启的事），但「等」和「刷」是两码事：不刷就等于主动丢掉最后那几个事件。
+ *
+ * 三条边界，都刻意：
+ *   - **有上限**：每个会话最多等 `SHUTDOWN_FLUSH_TIMEOUT_MS`；刷不动/服务缺失/抛错都不影响退出。
+ *   - **失败不汇报给用户**：关闭的响应早就发出去了，这里报什么都到不了界面；真实原因进 logger。
+ *   - **绝不阻塞退出**：任何一条路径走完都要落到 `appExit`，否则用户会遇到「点了关不掉」。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} deps - `createRestartState` 的结果（`shutdownFlushTimeoutMs` 可注入，便于测试）。
+ * @returns {Promise<{ sessions: number, flushed: number }>} 只用于测试与日志，不对外暴露。
+ */
+async function bestEffortFlush(ctx, deps) {
+  const timeoutMs = Number.isFinite(deps?.shutdownFlushTimeoutMs) ? deps.shutdownFlushTimeoutMs : SHUTDOWN_FLUSH_TIMEOUT_MS
+  const sessions = safeCall(() => ctx?.get?.('sessions'))
+  if (sessions === undefined || sessions === null || typeof sessions.flush !== 'function' || typeof sessions.list !== 'function') {
+    return { sessions: 0, flushed: 0 }
+  }
+  const live = safeCall(() => sessions.list())
+  if (!Array.isArray(live)) return { sessions: 0, flushed: 0 }
+
+  let flushed = 0
+  for (const session of live) {
+    let ok = false
+    try {
+      ok = await settleWithin(Promise.resolve(sessions.flush(session)), timeoutMs)
+    } catch (error) {
+      ctx.logger?.warn?.(`${PLUGIN_NAME}: 关闭前 flush 会话失败（不影响退出）：${describeError(error)}`)
+    }
+    if (ok === true) flushed += 1
+  }
+  if (flushed !== live.length) {
+    ctx.logger?.warn?.(`${PLUGIN_NAME}: 关闭前 flush：${live.length} 个活动会话里只有 ${flushed} 个在时限内刷完；仍然照常退出`)
+  }
+  return { sessions: live.length, flushed }
 }
 
 // ---------------------------------------------------------------------------

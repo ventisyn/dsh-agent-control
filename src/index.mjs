@@ -239,11 +239,18 @@ async function handleShutdownRequest(ctx, restart, req) {
       setTimeout(fn, SHUTDOWN_EXIT_DELAY_MS)
     }
   deferExit(() => {
+    // `exit` 现在是异步的（先尽力 flush 已记录的事件，再请求退出）；它仍然只 reject 一种情况：
+    // 宿主拒绝退出（`SHUTDOWN_FAILED`）。这里必须接住——unhandled rejection 会让「关不掉」变成
+    // 一个连日志都没有的静默失败。
     try {
-      result.exit()
+      Promise.resolve(result.exit()).catch((error) => {
+        // 响应已经发出去了，改不了它（也绝不再回一个「已经关掉」）：**如实记错误日志**。
+        // 标记已由 exit 自己复原，用户可以再点一次，或改从启动器/终端停止。
+        const control = toControlError(error, '关闭实例失败')
+        ctx.logger?.error?.(`${PLUGIN_NAME}: ${control.message}`)
+      })
     } catch (error) {
-      // 响应已经发出去了，改不了它（也绝不再回一个「已经关掉」）：**如实记错误日志**。
-      // 标记已由 exit 自己复原，用户可以再点一次，或改从启动器/终端停止。
+      // `exit` 同步抛出（理论上不该发生，它已经是 async 函数）——同样不能吞。
       const control = toControlError(error, '关闭实例失败')
       ctx.logger?.error?.(`${PLUGIN_NAME}: ${control.message}`)
     }

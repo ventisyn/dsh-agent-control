@@ -67,12 +67,12 @@
 ```
 node test/restart.test.mjs          54 / 54 pass
 node test/restart-helper.test.mjs   22 / 22 pass
-node test/host.test.mjs             40 / 40 pass
+node test/host.test.mjs             43 / 43 pass
 node test/client.test.mjs           53 / 53 pass
 node test/turn-delete.test.mjs      25 / 25 pass
 node test/session-delete.test.mjs   23 / 23 pass
                                     ─────────────
-                                    217 项全绿
+                                    220 项全绿
 ```
 
 `npm test` 里的 `node --check` 覆盖 17 个 `.mjs`/`.js` 文件（本机沙箱下 `node --test` 那一步会 `spawn EPERM` 假失败，所以测试逐个直跑，见 AGENTS.md 第 5 节）。
@@ -285,6 +285,29 @@ node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> session-38607d8e-…
 关掉之后，`/restart/status` 立即不可达（该实例的一次性用途结束，作业也随之完成）。
 
 **仍缺**：浏览器里的视觉确认（新那一行、确认框、「DSH 正在关闭…」/「实例已关闭」横幅）——客户端测试覆盖了态机与渲染结构，但没有真机截图。
+
+### 6.16 「关闭会不会写坏日志尾部？」——源码结论 + 补上 flush ✅
+
+评审问到这个，查了内核源码，答案是**不会损坏**，但原实现少了一半该做的事，已补：
+
+1. **尾部是未闭合轮次，是内核一等公民的合法状态**（崩溃、关窗口、启动器停止都是它）。`@deepseek-ai/dsh-session` 里就有专门的 crash-recovery 入口：
+
+   ```js
+   /**
+   * Crash-recovery entry point: synthetic closers that balance a persisted log
+   * whose tail turn was interrupted. ...
+   */
+   function interruptedTurnClosers(events) {
+     return openTurnClosers(events, { kind: "interrupted" });
+   }
+   ```
+
+   它补上缺失的 `step/end` 与 `turn/end {kind:'interrupted'}`；悬空的工具调用还会补一条合成结果（`ToolOutcomeUnknownError` / `ToolNotStartedError`，取决于工具是否已经开始）。v4 加载校验器**也不要求尾轮闭合**——坑 ⑪ 那条约束的是 `system/message`/`developer/message`/`assistant/attempt` 必须落在**打开**的轮次与步骤里，与「尾部没闭合」不冲突。
+2. **但「日志能读回来」不等于「已经记录的事件可以丢」**：`sessions.flush(session)` 返回「是否至少有一个持久化监听器参与」，而轮次删除那边早就证实过「flush 不为 true 时事件只在内存里、重启后会复活」——也就是说确实存在缓冲区。所以关闭**不等空闲，但退出前会尽力 flush**：
+   - 每个活动会话最多等 `SHUTDOWN_FLUSH_TIMEOUT_MS = 500`；
+   - 刷不动 / 抛错 / 没有 `sessions` 服务，一律**照常退出**（这个按钮的语义是「现在就停」，不能被持久化层卡成「关不掉」）；
+   - 失败只进 logger（响应早已发出，报什么都到不了界面）。
+3. 三条测试钉住这个行为：**响应之前不刷也不退**、**每个活动会话都刷一次**、**flush 卡住或抛错都不挡退出**（220 项里的 3 项）。
 
 ## 7. 本机环境事实（供排障参考）
 
