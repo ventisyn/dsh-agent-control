@@ -67,12 +67,12 @@
 ```
 node test/restart.test.mjs          54 / 54 pass
 node test/restart-helper.test.mjs   22 / 22 pass
-node test/host.test.mjs             43 / 43 pass
+node test/host.test.mjs             44 / 44 pass
 node test/client.test.mjs           53 / 53 pass
 node test/turn-delete.test.mjs      25 / 25 pass
 node test/session-delete.test.mjs   23 / 23 pass
                                     ─────────────
-                                    220 项全绿
+                                    221 项全绿
 ```
 
 `npm test` 里的 `node --check` 覆盖 17 个 `.mjs`/`.js` 文件（本机沙箱下 `node --test` 那一步会 `spawn EPERM` 假失败，所以测试逐个直跑，见 AGENTS.md 第 5 节）。
@@ -307,7 +307,15 @@ node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> session-38607d8e-…
    - 每个活动会话最多等 `SHUTDOWN_FLUSH_TIMEOUT_MS = 500`；
    - 刷不动 / 抛错 / 没有 `sessions` 服务，一律**照常退出**（这个按钮的语义是「现在就停」，不能被持久化层卡成「关不掉」）；
    - 失败只进 logger（响应早已发出，报什么都到不了界面）。
-3. 三条测试钉住这个行为：**响应之前不刷也不退**、**每个活动会话都刷一次**、**flush 卡住或抛错都不挡退出**（220 项里的 3 项）。
+3. 三条测试钉住这个行为：**响应之前不刷也不退**、**每个活动会话都刷一次**、**flush 卡住或抛错都不挡退出**（221 项里的 3 项）。
+
+### 6.17 顺带修掉：重启的日志文件名带着上一次启动的时间戳 ✅
+
+清掉 M0 原型时顺手核对 `last.json`，发现 `logFile` 指向 `…-155256.log`，而那次重启实际发生在 **16:36:34**——原因是日志文件名在**进程启动时**就算好、之后每次重启都沿用。
+
+后果不是功能故障，而是**诊断误导**：界面的「最近一次重启」、以及失败态里那句「日志文件：…」都会指着一个时间对不上的文件，让人以为信息是旧的（验收第 11 条恰好就是靠这个文件名指路的）。
+
+修法：新增 `deps.freshLogFile()`，在**真正重启的那一刻**用 `deps.now()` 现算文件名；调用方显式注入 `logFile` 时不给这个口子（测试与特殊部署注入的值仍然说了算）。已加测试（把时钟拨快两小时，断言名字跟着走）。
 
 ## 7. 本机环境事实（供排障参考）
 

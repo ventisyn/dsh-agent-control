@@ -174,6 +174,13 @@ export function createRestartState(ctx, options = {}) {
     host: safeCall(() => ctx?.webServer?.host),
     isWebApp,
     logFile: textOf(options.logFile) || safeCall(() => restartLogFile(dshHome)) || '',
+    // ⚠️ `logFile` 只是**启动时**算出来的缺省值。真正重启时用 `freshLogFile()` 现算：否则一个活了
+    // 两小时的进程做重启，新进程的日志文件会带着两小时前的时间戳（真机踩到——16:36 的重启在
+    // `last.json` 里写着 `…-155256.log`，界面于是指着一个「看起来不是这次」的文件名）。
+    // 只在调用方**没有**显式指定 `logFile` 时才提供它（测试注入的值仍然说了算）。
+    ...(textOf(options.logFile) === '' && safeCall(() => restartLogFile(dshHome)) !== ''
+      ? { freshLogFile: () => safeCall(() => restartLogFile(dshHome, deps.now())) ?? '' }
+      : {}),
     helperPath: textOf(options.helperPath) || helperScriptPath(),
     execPath: typeof process.execPath === 'string' ? process.execPath : '',
     cwd: process.cwd(),
@@ -843,6 +850,9 @@ async function restartSequence(ctx, deps, state) {
   }
 
   const specPath = path.join(deps.dir, SPEC_FILE)
+  // 日志文件名**在真正重启的这一刻现算**（理由见 `freshLogFile` 的注释）：这个名字会写进
+  // `spec.json` 并最终出现在界面的「最近一次重启」里，指错文件比不指还坏。
+  const logFile = typeof deps.freshLogFile === 'function' ? (deps.freshLogFile() || deps.logFile) : deps.logFile
   const spec = buildLaunchSpec({
     execPath: deps.execPath,
     execArgv: process.execArgv,
@@ -853,7 +863,7 @@ async function restartSequence(ctx, deps, state) {
     oldBootId: deps.bootId,
     // 空串 = 无法探测就绪：辅助进程会走降级路径（成功但标 degraded，不假装确认过）。
     statusUrl: deps.statusUrl === '' ? null : deps.statusUrl,
-    logFile: deps.logFile === '' ? null : deps.logFile,
+    logFile: logFile === '' ? null : logFile,
     restartId: state.restartId,
     now: deps.now(),
   })

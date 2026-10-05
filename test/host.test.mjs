@@ -891,6 +891,31 @@ test('POST /shutdown：空体与 {} 都接受 ⇒ 202；先回响应再退出，
   assert.deepEqual(jsonHost.exits, [0])
 })
 
+test('重启的日志文件名在重启那一刻现算，不沿用进程启动时的名字', async (t) => {
+  const home = tempHome(t)
+  const startAt = new Date('2026-10-05T15:52:56').getTime()
+  let now = startAt
+  const { ctx } = makeToolContext()
+
+  const deps = createRestartState(ctx, { dshHome: home, now: () => now })
+
+  // 启动时的缺省名字（用真实时钟算，与 `now` 注入无关——这一点不重要，只要它是个合法文件名）。
+  assert.match(deps.logFile, /agent-control-restart-\d{8}-\d{6}\.log$/, '启动时算出来的缺省名字')
+  assert.equal(typeof deps.freshLogFile, 'function')
+  // `freshLogFile` 走 `deps.now()`：把时钟拨到两小时后，名字必须跟着走。
+  now = startAt + 2 * 60 * 60 * 1000
+  assert.match(
+    deps.freshLogFile(),
+    /20261005-175256/,
+    '★ 真机踩过：活了两小时的进程做重启，日志文件却带着两小时前的时间戳，界面指着一个「看起来不是这次」的文件名',
+  )
+
+  // 调用方显式指定了 logFile 时**不给**现算口子：测试与特殊部署注入的值说了算。
+  const pinned = createRestartState(ctx, { dshHome: home, now: () => now, logFile: '/x/pinned.log' })
+  assert.equal(pinned.logFile, '/x/pinned.log')
+  assert.equal(pinned.freshLogFile, undefined)
+})
+
 test('关闭前先尽力 flush：每个活动会话刷一次，然后才 appExit', async (t) => {
   const home = tempHome(t)
   resetRestartRuntimeForTest()
