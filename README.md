@@ -1,6 +1,6 @@
 # dsh-agent-control
 
-DeepSeek Harness（DSH）插件：把两件**破坏性、不可撤销**的操作收进一个插件，用同一套确认与失败语义管理。
+DeepSeek Harness（DSH）插件：把三件会改变实例现状的**破坏性操作**——删除会话、删除一轮对话、重启或关闭进程——收进一个插件，用同一套确认与失败语义管理。
 
 - **删除会话**：把一个会话**不留残留**地移除——磁盘目录（两种 id 拼写）、工作区记账（含归档/置顶）、投影缓存记录，以及它派生的**子代理会话**（递归，同样清目录与缓存）。fork 出来的会话是独立对话，不受影响。子代理里只要有一个还驻留在内存里，整次删除都会拒绝、什么都不动
   - 插件**不碰**的：别的插件自己存的数据（例如审批类插件的事件记录里可能提到这个会话 id）、按内容寻址共享的附件（`$DSH_HOME/attachments`，可能被别的会话引用）
@@ -54,7 +54,7 @@ DeepSeek Harness（DSH）插件：把两件**破坏性、不可撤销**的操作
 - **它存在的理由**：实例被启动器失去跟踪之后（见上面那条），启动器里既看不到也停不掉它——这个按钮就是那种情况下唯一的收尾入口。当然，任何时候都能用它停实例。
 - **只有界面能触发**：插件**不提供**对应的模型工具。关掉实例会让所有会话与后台任务一起中断，而且**不会自动重启**（不像热重启会续作），所以这个决定只能由人来做。
 - **必须勾选确认**，弹窗里会列出当前有几个会话 / 后台任务会被中断，并写明「不会自动重启」。
-- 行为：接口先回 `101`（已经接受），然后进程退出；界面显示「DSH 正在关闭…」，随后是「实例已关闭，可以关掉这个页面」。要再用它，得从启动器或终端重新启动。
+- 行为：接口先回 `202`（已接受这次关闭请求），然后进程退出；界面显示「DSH 正在关闭…」，随后是「实例已关闭，可以关掉这个页面」。要再用它，得从启动器或终端重新启动。
 - **不会写坏日志**：退出前会**尽力把每个会话已经记录的事件刷到盘上**（每个会话最多等 500 毫秒，刷不动也照常退出）。如果关的时候正好有一轮在跑，那一轮在日志里会是「未闭合」，打开会话时由 DSH 内核按「被中断」补齐——这正是关窗口/崩溃时的同一套恢复路径，不是损坏。
 - 与热重启互斥：任一流程进行中时另一个按钮是禁用的。关闭**不等**正在跑的任务结束（它就是要立刻停），这一点与热重启刻意不同。
 
@@ -71,8 +71,11 @@ DeepSeek Harness（DSH）插件：把两件**破坏性、不可撤销**的操作
 ## 安装
 
 ```sh
-# 从已发布的版本分支安装
-dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#0.1.1-alpha.1-v1.0.1
+# 装最新发布版：不写 ref 时取仓库默认分支，本仓库的默认分支始终指向最新发布版本
+dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control
+
+# 需要钉到某个版本时，把 <完整版本号> 换成版本分支名（也是 Release 标题）
+dsh plugin --profile <profile 名> add github:ventisyn/dsh-agent-control#<完整版本号>
 
 # 本地开发（改完重启即生效）
 dsh plugin --profile <profile 名> add link:<本地 clone 路径>
@@ -92,10 +95,10 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>
 
 ```sh
 # 会话列表（同时也是「路由是否注册成功」的探针）
-curl http://117.0.0.1:<端口>/api/agent-control/sessions
+curl http://127.0.0.1:<端口>/api/agent-control/sessions
 
 # 热重启的状态（也是辅助进程判断「新进程起来了没有」的探针）
-curl http://117.0.0.1:<端口>/api/agent-control/restart/status
+curl http://127.0.0.1:<端口>/api/agent-control/restart/status
 ```
 
 浏览器控制台里：
@@ -113,8 +116,8 @@ GET  /api/agent-control/turns?sessionId=  某个会话里已被删除的轮次
 POST /api/agent-control/session/delete    { sessionId }
 POST /api/agent-control/turn/delete       { sessionId, assistantMessageId }
 GET  /api/agent-control/restart/status    热重启的状态（也是新进程的就绪探针）
-POST /api/agent-control/restart           { reason?, force? } → 101 { ok, restartId }
-POST /api/agent-control/shutdown          { }（可空体）→ 101 { ok } ← 停掉整个实例，只从界面触发
+POST /api/agent-control/restart           { reason?, force? } → 202 { ok, restartId }
+POST /api/agent-control/shutdown          { }（可空体）→ 202 { ok } ← 停掉整个实例，只从界面触发
 ```
 
 失败一律返回 `{ ok: false, error: { code, message } }`。错误码含义：
@@ -140,7 +143,7 @@ POST /api/agent-control/shutdown          { }（可空体）→ 101 { ok } ← �
 ## 开发
 
 ```sh
-npm test    # 语法检查 + 117 项离线测试，不需要 DSH 进程，也不碰真实 profile
+npm test    # 语法检查 + 225 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
 设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)。
