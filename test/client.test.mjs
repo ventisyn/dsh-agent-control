@@ -563,15 +563,17 @@ let lastSessionsService
  *
  * @param {Record<string, unknown>} [services] - 要由 `ctx.get(name)` 直接给出的服务
  *   （例如 `uiWorkspace` / `workspaces`：删除后「切走」那一步要用）。
+ * @param {{ throwing?: string[] }} [options] - `throwing` 里的名字会在**属性访问**时抛错，
+ *   模拟 cordis 的 `cannot get property "…" without inject`（真机踩过一次）。
  */
-function makeContext(services = {}) {
+function makeContext(services = {}, options = {}) {
   registrations.length = 0
   serviceInjections.length = 0
   slotInjections.length = 0
   stateSlots.clear()
   lastSessionsService = { refresh: () => { lastSessionsService.refreshed += 1 } }
   lastSessionsService.refreshed = 0
-  return {
+  const ctx = {
     get: (name) => services[name],
     inject(names, callback) {
       serviceInjections.push(...names)
@@ -594,6 +596,15 @@ function makeContext(services = {}) {
       },
     },
   }
+  for (const name of options.throwing ?? []) {
+    Object.defineProperty(ctx, name, {
+      get() {
+        throw new Error(`cannot get property "${name}" without inject`)
+      },
+      configurable: true,
+    })
+  }
+  return ctx
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,10 +1215,11 @@ function captureReload(t) {
  * 所以 `respond` 只需要按 URL 分流。
  *
  * @param {Record<string, unknown>} [services] - 直接交给 `ctx.get(name)` 的服务。
+ * @param {{ throwing?: string[] }} [options] - 转给 `makeContext`：属性访问会抛错的服务名。
  */
-async function mountSessionDeleteDialog(t, respond, sessionId = 'session-77', services = {}) {
+async function mountSessionDeleteDialog(t, respond, sessionId = 'session-77', services = {}, options = {}) {
   const browser = captureBrowser(t, respond)
-  loaded.apply(makeContext(services))
+  loaded.apply(makeContext(services, options))
   const dialog = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(dialog.component, { t: (key) => key })
   const onRequest = browser.listeners
@@ -1317,6 +1329,28 @@ test('主视图的引用在删除之后才放开时（真机就是这样），�
   await flush()
 
   assert.deepEqual(opened, ['session-88'], '★ 判断要在删除前做，否则会漏判、停在空白页')
+})
+
+test('uiWorkspace 取不到（cordis 的 without inject 会抛错）时，删除仍然算成功', async (t) => {
+  // 真机踩过：cordis 对没 inject 的服务做**属性访问**会抛 `cannot get property "uiWorkspace" without inject`，
+  // 那个异常一路冒进弹窗，于是「删除明明已经成功」被显示成「删除失败」。让开主视图只是体验补救，
+  // 绝不能反过来毁掉删除的结果——这条用例把「绝不因此报错」钉住。
+  const sessions = {
+    refresh: () => {},
+    retainInfo: () => ({ getSnapshot: () => ({ referenceCount: 1, retainedBy: { mainView: 1 } }) }),
+    list: { getSnapshot: () => ({ ids: [], byId: {} }) },
+  }
+  const { dialog, confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    return okSessions([{ sessionId: 'session-77', live: false }])
+  }, 'session-77', { sessions }, { throwing: ['uiWorkspace'] })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  const after = renderUntilStable(dialog.component, { t: (key) => key })
+  const still = findElement(after, (element) => element.type?.name === 'RiskConfirmation')
+  assert.equal(still, undefined, '★ 取不到 uiWorkspace 不该把成功的删除显示成失败')
 })
 
 test('删的不是当前会话时，界面一动不动（别把用户正在看的会话拽走）', async (t) => {

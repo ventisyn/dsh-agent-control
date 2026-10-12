@@ -2490,6 +2490,10 @@ let clientCtx
    *
    * 拿不到这些服务时**什么都不做**：宁可这一屏停着（刷新一次就对了），也不猜一个目标乱跳。
    *
+   * ⚠️ **整个函数包在 try/catch 里**：它是体验补救，绝不能把一次**已经成功**的删除变成用户看到的
+   * 「删除失败」（真机踩过：cordis 对没 `inject` 的服务做属性访问会抛 `cannot get property … without inject`，
+   * 于是删除明明成功、弹窗却报错）。取 `uiWorkspace` 也必须走安全的 `ctx.get()`，属性访问只当兜底。
+   *
    * ⚠️ 「是不是当前会话」必须在**删除请求之前**问（见确认回调里的注释）：删除之后主视图的引用会随
    * 列表更新一起放开，再问就永远是 0。所以判断与让开拆成两步，判断结果由调用方带进来。
    *
@@ -2498,8 +2502,46 @@ let clientCtx
    */
   function switchAwayFromDeletedSession(sessionId, wasCurrent) {
     if (wasCurrent !== true) return
-    const ui = clientCtx?.uiWorkspace ?? clientCtx?.get?.('uiWorkspace')
-    if (ui === undefined || ui === null) return
+    try {
+      const ui = lookupUiWorkspace()
+      if (ui === undefined || ui === null) return
+      openNextAfterDelete(ui, sessionId)
+    } catch {
+      // 让开失败只是体验降级：删除已经成功，绝不因此报错。
+    }
+  }
+
+  /**
+   * 取客户端的 `uiWorkspace` 服务。
+   *
+   * 优先 `ctx.get()`——它在没声明依赖时只是返回 undefined；直接读 `ctx.uiWorkspace` 属性会被 cordis 拦下并
+   * **抛错**（`cannot get property "uiWorkspace" without inject`），那次就是这样把一个成功的删除显示成失败的。
+   *
+   * @returns {any} 服务对象；拿不到时 undefined。
+   */
+  function lookupUiWorkspace() {
+    const ctx = clientCtx
+    if (ctx === undefined || ctx === null) return undefined
+    try {
+      const viaGet = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
+      if (viaGet !== undefined && viaGet !== null) return viaGet
+    } catch {
+      // 落到属性访问。
+    }
+    try {
+      return ctx.uiWorkspace
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * 真正把主视图挪到下一个会话上：优先同工作区里能打开的另一个会话，没有就开一个空白会话。
+   *
+   * @param {any} ui - 客户端 `uiWorkspace`。
+   * @param {string} sessionId - 刚被删掉的会话 id。
+   */
+  function openNextAfterDelete(ui, sessionId) {
     const next = pickNextSessionId(sessionId)
     if (next !== undefined && typeof ui.openSession === 'function') {
       try {
