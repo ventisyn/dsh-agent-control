@@ -2060,10 +2060,14 @@ let clientCtx
         setError(null)
         try {
           if (target.kind === 'session') {
+            // ⚠️ 必须在**删除请求之前**问：删掉之后主视图对它的引用会随列表更新一起放开，
+            // 那时候再问 `mainView` 计数已经变成 0，于是「删的是当前会话」这个判断会漏掉，
+            // 用户就停在一片空白上（真机踩过：删完只看到「选择一个工作区开始」）。
+            const wasCurrent = isMainViewSession(target.sessionId)
             setResolving(true)
             await deleteSession(target)
             setResolving(false)
-            switchAwayFromDeletedSession(target.sessionId)
+            switchAwayFromDeletedSession(target.sessionId, wasCurrent)
             refreshSessionList()
           } else {
             await callHost(API.turnDelete, {
@@ -2458,6 +2462,24 @@ let clientCtx
   }
 
   /**
+   * 这个会话是不是正被主视图持有（= 用户正在看它）。
+   *
+   * `sessions.retainInfo(id)` 是公开面（`ISessions`），`retainedBy.mainView` 就是主视图那一份引用；
+   * 拿不到服务或抛错时一律当「不是」，绝不乱切。
+   *
+   * @param {string} sessionId - 目标会话 id。
+   * @returns {boolean} 正被主视图持有时 true。
+   */
+  function isMainViewSession(sessionId) {
+    try {
+      const info = sessionsService?.retainInfo?.(sessionId)?.getSnapshot?.()
+      return info?.retainedBy?.mainView > 0
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * 删掉的正是「当前正在看的那个会话」时，把主视图让开。
    *
    * 这是照抄 ui-workspace 归档的做法：它归档当前会话时会调 `clearMain()`（清掉持久化的当前会话选择），
@@ -2468,17 +2490,15 @@ let clientCtx
    *
    * 拿不到这些服务时**什么都不做**：宁可这一屏停着（刷新一次就对了），也不猜一个目标乱跳。
    *
+   * ⚠️ 「是不是当前会话」必须在**删除请求之前**问（见确认回调里的注释）：删除之后主视图的引用会随
+   * 列表更新一起放开，再问就永远是 0。所以判断与让开拆成两步，判断结果由调用方带进来。
+   *
    * @param {string} sessionId - 刚被删掉的会话 id。
+   * @param {boolean} wasCurrent - 删除前它是否正被主视图持有。
    */
-  function switchAwayFromDeletedSession(sessionId) {
-    let info
-    try {
-      info = sessionsService?.retainInfo?.(sessionId)?.getSnapshot?.()
-    } catch {
-      return
-    }
-    if (!(info?.retainedBy?.mainView > 0)) return
-    const ui = clientCtx?.get?.('uiWorkspace')
+  function switchAwayFromDeletedSession(sessionId, wasCurrent) {
+    if (wasCurrent !== true) return
+    const ui = clientCtx?.uiWorkspace ?? clientCtx?.get?.('uiWorkspace')
     if (ui === undefined || ui === null) return
     const next = pickNextSessionId(sessionId)
     if (next !== undefined && typeof ui.openSession === 'function') {

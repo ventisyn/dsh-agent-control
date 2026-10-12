@@ -1290,6 +1290,35 @@ test('删掉的正是当前会话时，界面切到同工作区里的另一个�
   assert.deepEqual(opened, ['session-88'], '★ 必须让开到同工作区的另一个会话')
 })
 
+test('主视图的引用在删除之后才放开时（真机就是这样），仍然要切走', async (t) => {
+  // 真机踩过：删除请求发出后，列表更新会让主视图放开对它的引用；等删完再问 `mainView` 计数就是 0，
+  // 于是「删的是当前会话」被漏判，用户停在一片「选择一个工作区开始」上。判断必须在删除之前做。
+  const opened = []
+  let deleted = false
+  const sessions = {
+    refresh: () => {},
+    retainInfo: () => ({
+      getSnapshot: () => (deleted
+        ? { referenceCount: 0, retainedBy: {} }
+        : { referenceCount: 1, retainedBy: { mainView: 1 } }),
+    }),
+    list: { getSnapshot: () => ({ ids: ['session-88'], byId: { 'session-88': { id: 'session-88' } } }) },
+  }
+  const workspaces = { list: { getSnapshot: () => ({ items: [{ workspaceId: 'ws-1', sessionIds: ['session-88'] }], archivedSessionIds: [] }) } }
+  const { confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) {
+      deleted = true
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+    return okSessions([{ sessionId: 'session-77', live: false }])
+  }, 'session-77', { sessions, workspaces, uiWorkspace: { openSession: (id) => opened.push(id) } })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  assert.deepEqual(opened, ['session-88'], '★ 判断要在删除前做，否则会漏判、停在空白页')
+})
+
 test('删的不是当前会话时，界面一动不动（别把用户正在看的会话拽走）', async (t) => {
   const opened = []
   const sessions = { refresh: () => {}, retainInfo: () => ({ getSnapshot: () => ({ referenceCount: 0, retainedBy: {} }) }) }
