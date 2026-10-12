@@ -27,6 +27,14 @@ const HEADER_PROBE_BYTES = 64 * 1024
 export const DEFAULT_STOP_TIMEOUT_MS = 15000
 
 /**
+ * 活会话的收尾写入会晚一步落盘：实测（`0.2.1-alpha.2`）删一个还在跑的会话时，投影缓存就在删除的
+ * 同一秒里又被写了一份回来，之后不再变化。所以**只有目标当时还活着**才在清缓存之后复检几次——
+ * 某一轮什么都没删掉就立刻收手，不给普通删除（没被打开过的会话）加任何延迟。
+ */
+const CACHE_RECHECK_ATTEMPTS = 3
+const CACHE_RECHECK_DELAY_MS = 200
+
+/**
  * 在 `$DSH_HOME/sessions/<slug>/` 下找出属于某个会话的所有目录。
  *
  * `<slug>` 是工作区路径的转义形式，规则会随版本变化，所以这里**遍历**而不是推导。
@@ -200,12 +208,13 @@ export async function detachFromWorkspaces(registry, sessionId) {
  * @param {object} [deps.workspaceRegistry] - `ctx.workspaceRegistry`。
  * @param {{ delete(key: string): Promise<boolean> }} [deps.projectionCache] - 投影缓存域的 `sessions` 表。
  * @param {number} [deps.stopTimeoutMs] - 停 agent 的等待上限。
+ * @param {(ms: number) => Promise<void>} [deps.sleep] - 复检投影缓存时的等待实现（测试注入，避免真等）。
  * @returns {Promise<object>} 逐段结果：`dirs` / `removed`（含后代）、`descendants`、`detached`（等于 `workspace.detached`）、
  *   `stopped`、`wasLive`（目标当时是否活在本进程里）、`liveDescendants`、`workspace`、`projectionCache`、`warnings`。
  * @throws {ControlError} agent 停不下来、目标不存在、或目录删不净时抛出。
  */
 export async function deleteSession(deps, sessionId) {
-  const { sessionsRoot, agents, workspaceRegistry, projectionCache, stopTimeoutMs } = deps
+  const { sessionsRoot, agents, workspaceRegistry, projectionCache, stopTimeoutMs, sleep } = deps
   const isLive = typeof deps.isLive === 'function'
     ? (id) => deps.isLive(id) === true
     : (id) => id === sessionId && deps.live === true
@@ -264,7 +273,21 @@ export async function deleteSession(deps, sessionId) {
     workspace.unpinned = workspace.unpinned || child.unpinned
   }
 
-  const cache = await removeProjectionCache(projectionCache, targets)
+  let cache = await removeProjectionCache(projectionCache, targets)
+  if (wasLive) {
+    const wait = typeof sleep === 'function' ? sleep : (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    for (let attempt = 0; attempt < CACHE_RECHECK_ATTEMPTS; attempt += 1) {
+      await wait(CACHE_RECHECK_DELAY_MS)
+      const again = await removeProjectionCache(projectionCache, targets)
+      if (again.removed.length === 0) break
+      cache = {
+        ...cache,
+        removed: [...cache.removed, ...again.removed],
+        failures: [...cache.failures, ...again.failures],
+        warnings: [...cache.warnings, ...again.warnings],
+      }
+    }
+  }
 
   const warnings = [...lineage.warnings, ...cache.warnings]
   return {

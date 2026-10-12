@@ -99,12 +99,52 @@ test('活会话也能删：先停 agent、再删目录，并在结果里如实�
 
   // v1.2.0 起活会话不再是拒绝理由：实测（0.2.1-alpha.2）写句柄带 FILE_SHARE_DELETE，目录删得掉、
   // 也不会被写回来。内存里那条 store 记录仍然摘不掉，所以如实标 wasLive。
-  const result = await deleteSession({ sessionsRoot: sessions, agents, isLive: (target) => target === id }, id)
+  const slept = []
+  const result = await deleteSession({
+    sessionsRoot: sessions,
+    agents,
+    isLive: (target) => target === id,
+    sleep: async (ms) => { slept.push(ms) },
+  }, id)
 
   assert.equal(existsSync(dir), false, '★ 活会话的目录必须被真的删掉')
   assert.equal(result.wasLive, true)
   assert.deepEqual(result.liveDescendants, [])
   assert.deepEqual(cancelled, [{ kind: 'user' }], '删之前必须先把它停掉')
+  assert.ok(slept.length >= 1, '活会话要复检投影缓存（收尾写入会晚一步）')
+})
+
+test('活会话删完、投影缓存被收尾写入写回来一次时，复检要再清掉', async (t) => {
+  // 实测（0.2.1-alpha.2）：删一个还在跑的会话时，投影缓存就在删除的同一秒里又被写回一份。
+  // 只清一次会留下一个孤儿缓存文件——这条用例把「复检」钉住。
+  const sessions = tempSessionsRoot(t)
+  const id = 'aa11bb22-0000-0000-0000-000000000004'
+  makeSessionDir(sessions, '--D-work-alpha--', id)
+  const store = new Set([id])
+  let rewrote = 0
+  const table = {
+    async delete(key) {
+      const had = store.delete(key)
+      // 第一次成功删除之后，模拟会话收尾时又把这一份写了回来（只发生一次）。
+      if (had && rewrote === 0) {
+        rewrote += 1
+        store.add(id)
+      }
+      return had
+    },
+  }
+  const slept = []
+
+  const result = await deleteSession({
+    sessionsRoot: sessions,
+    isLive: () => true,
+    projectionCache: table,
+    sleep: async (ms) => { slept.push(ms) },
+  }, id)
+
+  assert.equal(store.size, 0, '★ 被写回来的那一份必须再清掉')
+  assert.ok(result.projectionCache.removed.filter((key) => key === id).length >= 2, '两次删除都要如实记进 removed')
+  assert.ok(slept.length >= 1 && slept.length <= 3, '复检次数要有上限，不能一直等下去')
 })
 
 test('找不到会话时报 TARGET_NOT_FOUND，不是假的成功', async (t) => {
