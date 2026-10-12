@@ -58,9 +58,12 @@ function makeHost(services = {}, options = {}) {
   const routes = new Map()
   const errors = []
   const warnings = []
+  /** 插件往宿主事件总线上发的东西（例如删除后的 `api-session/removed`）。 */
+  const emitted = []
   const ctx = {
     effect: (fn) => fn(),
     on() {},
+    emit: (name, ...args) => emitted.push({ name, args }),
     get: (name) => services[name],
     logger: { error: (message) => errors.push(message), warn: (message) => warnings.push(message) },
     webServer: {
@@ -71,7 +74,7 @@ function makeHost(services = {}, options = {}) {
     },
   }
   apply(ctx, options.config, options.host)
-  return { routes, errors, warnings }
+  return { routes, errors, warnings, emitted }
 }
 
 /**
@@ -222,6 +225,21 @@ test('删除成功的响应里 detached 反映真实的记账结果', async (t) 
   assert.equal(response.status, 200)
   assert.equal(response.body.detached, false, '记账里没有它，就不能报已解除')
   assert.match(response.body.warnings.join('\n'), /没有找到这个会话/)
+})
+
+test('删掉会话后通知界面：发出 api-session/removed（否则它会掉进侧栏「未分组」）', async (t) => {
+  // 宿主的会话索引仍然握着内存里那条记录（本插件摘不掉），列表里「不在任何工作区」的会话会被
+  // 摆进「未分组」——真机上删掉的会话就那样挂着。`api-session/removed` 是宿主自己的公开事件
+  // （它自己在 session/disposed 时发的就是它），客户端收到会把这一行摘掉。
+  const home = tempHome(t)
+  makeSessionDir(home, 'session-abc')
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] } })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 200)
+  const removed = host.emitted.filter((entry) => entry.name === 'api-session/removed').map((entry) => entry.args[0])
+  assert.deepEqual(removed, ['session-abc'], '★ 必须告诉界面这个会话没了')
 })
 
 test('列表的 live 来自 store 现查：会话关掉后立刻不再是 live（不依赖事件订阅）', async (t) => {

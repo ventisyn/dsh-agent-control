@@ -339,6 +339,18 @@ async function handleDeleteSession(ctx, payload) {
     warnings.push('这个部署没有工作区注册表，工作区记账那一段没有执行')
   }
   warnings.push(...result.workspace.failures)
+  // 通知宿主的界面表面「这些会话没了」。宿主的会话索引仍然握有内存里那条记录（本插件摘不掉），
+  // 而列表里「不在任何工作区」的会话会被摆进侧栏的「未分组」——真机实测：删掉的会话就那样挂在
+  // 未分组里。`api-session/removed` 是宿主自己的公开事件（`dsh-api-remotes` 的 remote-events 里
+  // 登记过，签名 `(sessionId: SessionId)`；宿主在 `session/disposed` 时发的就是它），客户端收到就会
+  // 把这一行从会话列表里摘掉。发不出去不影响删除本身，所以只降级成 warning。
+  for (const id of [result.sessionId, ...result.descendants]) {
+    const sent = safeCall(() => {
+      ctx.emit('api-session/removed', id)
+      return true
+    })
+    if (sent !== true) warnings.push(`没能通知界面「${id} 已删除」（宿主没有 emit 能力），侧栏可能要刷新之后才会少掉它`)
+  }
   return { status: 200, body: { ok: true, ...result, warnings } }
 }
 
