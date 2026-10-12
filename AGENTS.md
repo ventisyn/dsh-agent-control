@@ -7,10 +7,10 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 225 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 228 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
-> - **拒绝路径**：`SESSION_LIVE`（409）、`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）
+> - **拒绝路径**：`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）、`AGENT_BUSY`（423，agent 停不下来）
 > - **界面行为**：只隐藏目标轮次（坑 ⑩）、删除后**实时**更新不需刷新（6.2）、同步时不再让已藏的行闪现一帧（6.3）、删除时该轮**收起折叠**（6.4）——四条都已由用户真机确认
 >
 > **尚未验证**（只剩一条）：`DELETE_FAILED` 从真实失败渲染——本轮**试过造这个失败但没造出来**（Node 在 Windows 上带全部共享位打开文件，宿主的 `rm` 挡不住；只读缓存只进 warnings），证据链两段各自成立、接口未串起来（VERIFY 第 11.7 节）。
@@ -95,9 +95,9 @@
 删除必须按**固定顺序**（顺序错了会留下孤儿目录或错误的记账）：
 
 ```
-校验 id → 拒绝活会话（两种拼写都查）→ 确认磁盘上有目录（没有 → TARGET_NOT_FOUND，不产生任何副作用）
+校验 id → 确认磁盘上有目录（没有 → TARGET_NOT_FOUND，不产生任何副作用）
         → 找出子代理后代（读会话头：origin=subagent 且 parentSession 指向它，递归；fork 不算）
-          → 任一后代活着 → SESSION_LIVE，整次放弃、什么都不动
+          （活着的后代不再拒绝，只在结果里登记 `liveDescendants`）
         → 停掉运行中的 agent（目标 + 后代；cancel + 等静默，有超时上限）
         → 删磁盘目录（目标 + 后代）→ 再删一次（防 dispose 路径重建）→ 确认删净
         → 才清工作区记账（两种拼写都认，用记账里那一种去解除）
@@ -106,23 +106,25 @@
 
 **「不留残留」的范围（0.2.0-rc.2 实测，用一个真实会话 id 全盘 grep 得出）**：会话目录、`storages/workspace.json` 里的记账、`storages/session_projcache/sessions/<id>.json`、以及子代理会话（`origin: 'subagent'` 的独立会话，实测 59 个会话里有 25 个是子代理；父会话头里写 `session-<uuid>`，子代理目录是裸 uuid）。**刻意不碰**：别的插件自己的数据（如审批插件的 `auto-approve/events.jsonl` 里有 sessionId 字段——那是它的审计记录，不归我们删）、内容寻址的共享附件、别的会话日志/缓存里**提到**这个 id 的文本（例如子代理的提示词里写着父会话 id）。投影缓存**必须走域的表接口删**，不能直接删 json 文件：域在内存里持有一份，直接删文件会在下次写入时被写回来。
 
-**id 两种拼写贯穿每一道闸门**：找目录时两种拼写都会被删，所以活会话闸门（`ctx.sessions.get`）、agent 查找、工作区/归档/置顶记账也必须两种都查——只查一种，用另一种拼写请求就能绕过闸门删掉活会话的目录（已修复的真实 bug）。响应里的 `detached` 等于记账是否真的被解除，不是恒真。
+**id 两种拼写贯穿每一步**：找目录时两种拼写都会被删，所以 agent 查找、工作区/归档/置顶记账也必须两种都查——只查一种，用另一种拼写请求就能绕过闸门删掉活会话的目录（已修复的真实 bug）。响应里的 `detached` 等于记账是否真的被解除，不是恒真。
 
 **「哪些会话活着」每次现查 store**，不在模块级别缓存：`ctx.on` 的监听随插件 fiber 卸载而注销，而 host 模块不会被重新 import（坑 ⑦），内核也不会在热重载时重放 `session/created`——缓存一份副本必然过期。
 
-**DSH 没有「删除会话」这个公开 API。** 已在 `0.2.0-rc.2` 核对过 `SessionStore`（即 `ctx.sessions`）的公开面：`create` / `prepare` / `enter` / `announce` / `flush` / `get` / `list` / `registerMessageProjection` / `fork`，**没有任何 `delete` / `remove`**；把已进入 store 的会话摘出去的唯一公开途径是 `enter(session)` 返回的那个 **detach disposer**，而 `detachEntered` 是 `private`。
+**DSH 没有「删除会话」这个公开 API。** 已在 `0.2.1-alpha.2` 复核过 `SessionStore`（即 `ctx.sessions`）的公开面：`create` / `prepare` / `enter` / `announce` / `flush` / `get` / `list` / `registerMessageProjection` / `fork`，**没有任何 `delete` / `remove`**；把已进入 store 的会话摘出去的唯一公开途径是 `enter(session)` 返回的那个 **detach disposer**，而 `detachEntered` 是 `private`。
 
-**关键推论：那个 disposer 只交给创建者，插件拿不到。** 它由 agent 工厂在 `AgentRegistry.create()` 时持有（类型文档原话：the disposer is a CAPABILITY），`ctx.sessions` 上没有任何办法再取回它。所以本插件的删除是**两段拼接**——磁盘目录 + 工作区记账——外加一道**拒绝活会话**的闸门：
+**那个 disposer 只交给创建者，插件拿不到。** 它由 agent 工厂在 `AgentRegistry.create()` 时持有（类型文档原话：the disposer is a CAPABILITY）；`ctx.agents.get(id)` 只返回裸 `Agent`，`AgentHandle.dispose()` 才是唯一公开的拆除入口，而 handle 只给创建它的 consumer owner（网页端的 `sessionController`），它的公开方法里也没有 close / release，控制器里更没有空闲回收。所以**内存里那条 store 记录，本插件确实摘不掉**——到 `0.2.1-alpha.2` 仍然如此（`GET /turns` 也只对活动会话可读）。
+
+**但磁盘不需要那个 API**（v1.2.0 的实测结论，见 VERIFY）：日志写句柄在 Windows 上带 `FILE_SHARE_DELETE`，删一个**正在写**的会话目录会成功；删完之后目录没有被写回来——期间它一直在追加事件，agent 结束、dispose 走完之后再查仍然不在。于是删除变成：
 
 ```
-活会话 → 拒绝（SESSION_LIVE），提示重启后不打开它直接删（切走没用，见下）；
-否则   → 删磁盘目录 → 确认删净 → 清工作区记账
+删磁盘目录（目标 + 后代）→ 确认删净 → 清工作区记账 → 清投影缓存
 ```
 
-⚠️ **「活会话」≈「本次启动后打开过的会话」**（0.2.0-rc.2 真机实测）：切换到别的会话**不会**让它下线。Web 端由 `dsh-api-session-controller` 打开会话并持有 `AgentHandle`，它没有空闲回收、也没有关闭入口；`AgentRegistry` 的公开面（`get` / `list` / `roots` / `create` / `resume` …）同样没有卸载手段。所以会话会一直驻留到 `dsh web` 退出，用户唯一的出路是**重启后不打开它、直接从侧栏菜单删除**。文案必须照这个说，早期版本写的「先切换到别的会话再删」是错的。
-（**实测闭环**：重启后请用户切走，复查 `GET /sessions` 该会话仍是 `live: true`；页面 `location.reload()` 之后也仍是——**只有重启进程才释放**。见 VERIFY 第 11.3、11.5 节。）
+活会话不再被拒绝，只多做两件事：**先停 agent**，以及在结果里如实标注 `wasLive` / `liveDescendants`（内存里那条记录还在，进程退出才消失——这是本功能已知、且说清楚的残留）。
 
-为什么不是「删了磁盘、内存里的条目留着」：那会留下「目录没了但会话还在列表里」的半删除现场，且活着的会话可能继续追加事件、把目录写回来。**宁可拒绝一次操作，也不制造一个说不清的状态。**
+**界面那一侧靠「让开」补上最后一环**（学 `ui-workspace` 归档）：客户端用公开的 `sessions.retainInfo(id).retainedBy.mainView > 0` 判断被删的是不是当前正在看的会话，是就 `uiWorkspace.openSession(同工作区里另一个会话)`——它与归档内部那句 `clearMain()`（private）等价，**会连带重写持久化的「当前会话」**，所以重启后界面不会再打开一个已经删掉的会话。
+
+**半删除现场的边界**：磁盘、工作区记账、投影缓存、界面（列表与当前视图）**四样必须一起消失**——只删磁盘不摘记账会留下「目录没了但会话还在列表里」，只删列表不动磁盘就是撒谎。内存里那条 store 记录是唯一例外，而且无害：它不再对应任何磁盘数据，也不再被任何界面打开，进程退出即消失。
 
 **绝不假装删成功**：工作区那段可能没执行（没有注册表）或部分失败，这些都必须单独回报，不能合并成一个布尔。有一种常见写法是「无论如何都删下去」：把 `storageDomain` 的每一次失败都 `catch {}` 吞掉，于是 `projRemoved` / `workspaceRemoved` 为假时**分不清「本来就没有」和「清理抛错了」**——本仓库不采用这种写法。
 
@@ -203,7 +205,7 @@
 - 弹窗里写清**目标是什么**（会话名 + id / 第几轮 + 消息 id）与**到底会发生什么**（会话：连同磁盘目录与记账一起永久删除；轮次：只从模型上下文移除，日志仍在）
 - 两类都要求**显式勾选**，没有「记住我的选择」，也不提供「一键删多轮」
 - 按钮与弹窗之间用自定义事件 `dsh-agent-control:request-delete` 通信：按钮只负责派发目标，弹窗统一监听。这样一个弹窗就能服务两类操作，不会出现两个弹窗同时响应
-- 会话删除在确认时**再查一次列表**：目标不存在 → `TARGET_NOT_FOUND`，仍是活会话 → `SESSION_LIVE`，两条都在弹窗里说清楚，而不是让用户对着一个笼统的失败猜。host 端仍会独立校验一次（不信任前端）
+- 会话删除在确认时**再查一次列表**：目标不存在 → `TARGET_NOT_FOUND`，在弹窗里说清楚，而不是让用户对着一个笼统的失败猜。活会话不再是失败理由（host 会先停掉它再删）。host 端仍会独立校验一次（不信任前端）
 
 ### 3.5 HTTP 接口（已实现）
 
@@ -428,11 +430,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**225 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
+- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**228 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
 - ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（44）、`node test/client.test.mjs`（57）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（23），合计同样是 **225 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（44）、`node test/client.test.mjs`（60）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（23），合计同样是 **228 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
 - ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
@@ -553,7 +555,7 @@ chore: bump version to 0.2.0-rc.2-v1.0.1
    - **删除一个不重要的会话**：磁盘目录**真的消失**（不是只剩配置行），`sessions/` 下没有残留，工作区里也没有指向它的记账，`storages/session_projcache/sessions/` 下没有它（两种拼写）的文件；**用会话 id 对 `$DSH_HOME` 全盘 grep 一次**，除了别的插件的数据与别的会话里提到它的文本，不该再有命中
    - **删一个派生过子代理的会话**：子代理会话的目录与缓存一起消失，fork 出来的会话保留
    - **删一个 `session-<n>` 形式的 id**：同样要成功（第 4 节坑 ①）
-   - **删一个仍活着的会话**：必须被判 `SESSION_LIVE` 并拒绝，磁盘目录原样保留；界面要说清楚「切走没用，重启后不打开它直接删」
+   - **删一个仍活着的会话**：必须成功（先停 agent，再删目录 / 记账 / 缓存），响应里 `wasLive: true`；删的正是正在看的那个会话时，界面要切到同工作区的另一个会话（照抄归档的让开），刷新后不会停在一个已经不存在的会话上
    - **重复删同一个会话**：返回明确的「不存在」，不是 500，也不是假的成功
    - **删中间一轮**：该轮从界面与模型上下文消失，**前后轮次完好**；把会话发给模型确认被删轮次确实不在上下文里
    - **删最后一轮**：成功后新消息能正常追加
