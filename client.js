@@ -783,6 +783,8 @@
   let IconRefreshOutlineRegular
   let localeService
   let sessionsService
+/** 客户端 cordis 上下文：留一份，让不接收 ctx 的辅助函数也能问 uiWorkspace / workspaces。 */
+let clientCtx
 
   /** 每个会话已删除的轮次：`sessionId -> Promise<number[]>`，避免每个标记各拉一次。 */
   const deletedTurnsCache = new Map()
@@ -2061,6 +2063,7 @@
             setResolving(true)
             await deleteSession(target)
             setResolving(false)
+            switchAwayFromDeletedSession(target.sessionId)
             refreshSessionList()
           } else {
             await callHost(API.turnDelete, {
@@ -2418,8 +2421,11 @@
   /**
    * 删除会话。
    *
-   * 先重新确认目标仍然存在、且不是活动会话——这样「找不到」与「还活着」都在弹窗里
-   * 说清楚，而不是让用户对着一个笼统的失败猜。host 端仍会独立校验（不信任前端）。
+   * 只先重新确认目标仍然存在——「找不到」在弹窗里说清楚，而不是让用户对着一个笼统的失败猜。
+   * host 端仍会独立校验（不信任前端）。
+   *
+   * v1.2.0 起**不再拒绝活会话**：host 会先把它停掉再删目录（实测活着的会话同样删得掉、也不会被
+   * 写回来）。界面这一侧的对应责任是删完把主视图让开，见 switchAwayFromDeletedSession。
    */
   async function deleteSession(target) {
     const listed = await callHost(API.sessions)
@@ -2429,9 +2435,6 @@
     if (known === undefined) {
       // message 留空：文案已经由错误码给出，不要再在括号里拼一句英文。
       throw Object.assign(new Error(''), { code: 'TARGET_NOT_FOUND' })
-    }
-    if (known.live === true) {
-      throw Object.assign(new Error(''), { code: 'SESSION_LIVE' })
     }
     await callHost(API.sessionDelete, {
       method: 'POST',
@@ -2452,6 +2455,80 @@
       }
     }
     window.location.reload()
+  }
+
+  /**
+   * 删掉的正是「当前正在看的那个会话」时，把主视图让开。
+   *
+   * 这是照抄 ui-workspace 归档的做法：它归档当前会话时会调 `clearMain()`（清掉持久化的当前会话选择），
+   * 所以「切走之后就不会再回来」。我们没有 `clearMain`（private），但公开面等价：
+   *   · `sessions.retainInfo(id)` 的 `mainView` 引用计数就是「它正被主视图持有」的公开判据；
+   *   · `uiWorkspace.openSession(下一个)` 会连带把持久化的当前会话改成那一个——重启后界面不会
+   *     再去打开已经被删掉的会话（这是「打开过的会话也能删」这条功能的关键一步）。
+   *
+   * 拿不到这些服务时**什么都不做**：宁可这一屏停着（刷新一次就对了），也不猜一个目标乱跳。
+   *
+   * @param {string} sessionId - 刚被删掉的会话 id。
+   */
+  function switchAwayFromDeletedSession(sessionId) {
+    let info
+    try {
+      info = sessionsService?.retainInfo?.(sessionId)?.getSnapshot?.()
+    } catch {
+      return
+    }
+    if (!(info?.retainedBy?.mainView > 0)) return
+    const ui = clientCtx?.get?.('uiWorkspace')
+    if (ui === undefined || ui === null) return
+    const next = pickNextSessionId(sessionId)
+    if (next !== undefined && typeof ui.openSession === 'function') {
+      try {
+        ui.openSession(next)
+        return
+      } catch {
+        // 落到 startSession。
+      }
+    }
+    if (typeof ui.startSession === 'function') {
+      try {
+        ui.startSession(workspaceIdOfSession(sessionId))
+      } catch {
+        // 让开失败就维持原样：这是体验降级，不是删除失败。
+      }
+    }
+  }
+
+  /**
+   * 挑一个还能打开的会话顶上：优先同一工作区里的空白会话，其次是同工作区最后一个，
+   * 最后退回全局列表最后一个。归档过的会话不挑（它在界面上本来就是藏起来的）。
+   *
+   * @param {string} sessionId - 被删掉的那个。
+   * @returns {string | undefined} 下一个会话 id；一个都没有时 undefined。
+   */
+  function pickNextSessionId(sessionId) {
+    const sessions = sessionsService?.list?.getSnapshot?.()
+    const workspaces = clientCtx?.get?.('workspaces')?.list?.getSnapshot?.()
+    const archived = new Set(workspaces?.archivedSessionIds ?? [])
+    const variants = new Set(sessionIdVariants(sessionId))
+    const usable = (id) => typeof id === 'string'
+      && !variants.has(id)
+      && !archived.has(id)
+      && sessions?.byId?.[id] !== undefined
+    const group = (workspaces?.items ?? []).find((item) => (item?.sessionIds ?? []).some((id) => variants.has(id)))
+    const inGroup = (group?.sessionIds ?? []).filter(usable)
+    const blank = inGroup.find((id) => sessions?.byId?.[id]?.blank === true)
+    if (blank !== undefined) return blank
+    if (inGroup.length > 0) return inGroup[inGroup.length - 1]
+    const all = (sessions?.ids ?? []).filter(usable)
+    return all.length > 0 ? all[all.length - 1] : undefined
+  }
+
+  /** 会话所属工作区 id（按记账里的成员关系找）；找不到时 undefined。 */
+  function workspaceIdOfSession(sessionId) {
+    const variants = new Set(sessionIdVariants(sessionId))
+    const workspaces = clientCtx?.get?.('workspaces')?.list?.getSnapshot?.()
+    const group = (workspaces?.items ?? []).find((item) => (item?.sessionIds ?? []).some((id) => variants.has(id)))
+    return group?.workspaceId
   }
 
   /**
@@ -2704,6 +2781,7 @@
 
   function apply(ctx) {
     adoptLocale(ctx)
+    clientCtx = ctx
     sessionsService = ctx.get('sessions')
     if (sessionsService === undefined) {
       ctx.inject(['sessions'], (sub) => {

@@ -86,22 +86,25 @@ test('删除会话：磁盘目录消失，工作区记账被解除', async (t) =
   assert.deepEqual(result.workspace.failures, [])
 })
 
-test('活会话被拒绝，且磁盘目录原样保留', async (t) => {
+test('活会话也能删：先停 agent、再删目录，并在结果里如实标注 wasLive', async (t) => {
   const sessions = tempSessionsRoot(t)
   const id = 'aa11bb22-0000-0000-0000-000000000003'
   const dir = makeSessionDir(sessions, '--D-work-alpha--', id)
+  const cancelled = []
+  const agents = {
+    get: (target) => (target === id
+      ? { status: 'running', cancel: (cause) => cancelled.push(cause), whenIdle: async () => {} }
+      : undefined),
+  }
 
-  await assert.rejects(
-    () => deleteSession({ sessionsRoot: sessions, live: true }, id),
-    (error) => {
-      assert.equal(error.code, ERROR_CODES.sessionLive)
-      // 不能再叫用户「先切走」：切走不会释放会话（真机实测），要说清楚只能重启后删。
-      assert.match(error.message, /重启 dsh web/)
-      assert.match(error.message, /不会释放/)
-      return true
-    },
-  )
-  assert.equal(existsSync(dir), true, '被拒绝时不得动磁盘')
+  // v1.2.0 起活会话不再是拒绝理由：实测（0.2.1-alpha.2）写句柄带 FILE_SHARE_DELETE，目录删得掉、
+  // 也不会被写回来。内存里那条 store 记录仍然摘不掉，所以如实标 wasLive。
+  const result = await deleteSession({ sessionsRoot: sessions, agents, isLive: (target) => target === id }, id)
+
+  assert.equal(existsSync(dir), false, '★ 活会话的目录必须被真的删掉')
+  assert.equal(result.wasLive, true)
+  assert.deepEqual(result.liveDescendants, [])
+  assert.deepEqual(cancelled, [{ kind: 'user' }], '删之前必须先把它停掉')
 })
 
 test('找不到会话时报 TARGET_NOT_FOUND，不是假的成功', async (t) => {
@@ -382,7 +385,7 @@ test('★ 删除会话时一并删掉它派生的子代理会话（递归），f
   assert.deepEqual(result.projectionCache.removed.sort(), ['c1', 'g1', 'session-p1'])
 })
 
-test('子代理后代里有一个活着，整次删除都拒绝，什么都不动', async (t) => {
+test('活着的子代理后代也一起删掉，只是会登记进 liveDescendants', async (t) => {
   const sessions = tempSessionsRoot(t)
   const parent = makeSessionWithHeader(sessions, '--D-work--', 'session-p2', { id: 'session-p2' })
   const child = makeSessionWithHeader(sessions, '--D-work--', 'c2', { id: 'c2', origin: 'subagent', parentSession: 'session-p2' })
@@ -390,18 +393,13 @@ test('子代理后代里有一个活着，整次删除都拒绝，什么都不�
   const detached = []
   const workspaceRegistry = { list: () => [{ id: 'ws', sessionIds: ['session-p2'], detachSession: async (id) => detached.push(id) }] }
 
-  await assert.rejects(
-    () => deleteSession({ sessionsRoot: sessions, projectionCache: cache, workspaceRegistry, isLive: (id) => id === 'c2' }, 'session-p2'),
-    (error) => {
-      assert.equal(error.code, ERROR_CODES.sessionLive)
-      assert.match(error.message, /子代理会话 c2/)
-      return true
-    },
-  )
-  assert.equal(existsSync(parent), true)
-  assert.equal(existsSync(child), true)
-  assert.deepEqual(detached, [], '记账不能动')
-  assert.equal(cache.store.size, 2, '缓存不能动')
+  const result = await deleteSession({ sessionsRoot: sessions, projectionCache: cache, workspaceRegistry, isLive: (id) => id === 'c2' }, 'session-p2')
+
+  assert.equal(existsSync(parent), false)
+  assert.equal(existsSync(child), false, '★ 活着的子代理目录同样要删掉')
+  assert.deepEqual(result.liveDescendants, ['c2'])
+  assert.deepEqual(detached, ['session-p2'], '记账照常解除')
+  assert.equal(cache.store.size, 0, '缓存照常清空')
 })
 
 test('投影缓存两种拼写都删；缓存服务不可用时如实回报，不假装清理成功', async () => {

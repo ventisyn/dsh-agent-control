@@ -201,8 +201,8 @@ export async function detachFromWorkspaces(registry, sessionId) {
  * @param {{ delete(key: string): Promise<boolean> }} [deps.projectionCache] - 投影缓存域的 `sessions` 表。
  * @param {number} [deps.stopTimeoutMs] - 停 agent 的等待上限。
  * @returns {Promise<object>} 逐段结果：`dirs` / `removed`（含后代）、`descendants`、`detached`（等于 `workspace.detached`）、
- *   `stopped`、`workspace`、`projectionCache`、`warnings`。
- * @throws {ControlError} 目标或其后代是活会话、agent 停不下来、目标不存在、或目录删不净时抛出。
+ *   `stopped`、`wasLive`（目标当时是否活在本进程里）、`liveDescendants`、`workspace`、`projectionCache`、`warnings`。
+ * @throws {ControlError} agent 停不下来、目标不存在、或目录删不净时抛出。
  */
 export async function deleteSession(deps, sessionId) {
   const { sessionsRoot, agents, workspaceRegistry, projectionCache, stopTimeoutMs } = deps
@@ -210,25 +210,22 @@ export async function deleteSession(deps, sessionId) {
     ? (id) => deps.isLive(id) === true
     : (id) => id === sessionId && deps.live === true
 
-  if (isLive(sessionId)) {
-    throw new ControlError(ERROR_CODES.sessionLive, liveMessage(sessionId))
-  }
+  // 「目标还活在本进程里」**不再是拒绝理由**（v1.2.0 起）。实测（0.2.1-alpha.2）：日志写句柄带
+  // FILE_SHARE_DELETE，活会话的目录照样删得掉；删掉之后不会被写回来，agent 结束时的 dispose 路径
+  // 也没有把它重建出来——期间它一直在追加事件。所以这里只登记事实，接着照常停 agent、删目录。
+  // 内存里那条 store 记录仍然摘不掉（DSHL/宿主没有公开的卸载接口），这是本功能已知的残留：
+  // 它不再对应任何磁盘数据，进程退出即消失。
+  const wasLive = isLive(sessionId)
 
   const rootDirs = findSessionDirs(sessionsRoot, sessionId)
   if (rootDirs.length === 0) {
     throw new ControlError(ERROR_CODES.targetNotFound, `找不到会话 ${sessionId}`)
   }
 
-  // 子代理后代：在动任何东西之前算出来，并且逐个过活会话闸门。
+  // 子代理后代：在动任何东西之前算出来（它们的目录要一起删）。活着的后代同样不再拒绝，
+  // 但会登记下来——调用方据此知道这次删掉的东西里有还驻留在内存里的。
   const lineage = findSubagentDescendants(sessionsRoot, sessionId)
-  const liveDescendant = lineage.descendants.find((id) => isLive(id))
-  if (liveDescendant !== undefined) {
-    throw new ControlError(
-      ERROR_CODES.sessionLive,
-      `它派生的子代理会话 ${liveDescendant} 还驻留在内存里，整次删除已放弃、什么都没动。${liveMessage(liveDescendant)}`,
-      { detail: { liveDescendant } },
-    )
-  }
+  const liveDescendants = lineage.descendants.filter((id) => isLive(id))
 
   const targets = [sessionId, ...lineage.descendants]
   const timeout = stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS
@@ -277,15 +274,12 @@ export async function deleteSession(deps, sessionId) {
     descendants: lineage.descendants,
     detached: workspace.detached,
     stopped,
+    wasLive,
+    liveDescendants,
     workspace,
     projectionCache: cache,
     warnings,
   }
-}
-
-/** SESSION_LIVE 的统一说法：切走没用，只能重启后不打开它再删。 */
-function liveMessage(sessionId) {
-  return `会话 ${sessionId} 在本次启动后打开过，仍驻留在内存里，无法删除：切换到别的会话不会释放它（DSH 没有卸载会话的公开接口）。请重启 dsh web，重启后不要打开它，直接删除`
 }
 
 /**

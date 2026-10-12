@@ -322,9 +322,9 @@ async function handleListSessions(ctx) {
 async function handleDeleteSession(ctx, payload) {
   const sessionId = assertSessionId(payload?.sessionId)
   const sessions = ctx.get?.('sessions')
-  // ⚠️ 两种拼写都要查：磁盘上找目录时 `session-<id>` 与 `<id>` 都会被删，
-  // 闸门只查一种的话，用另一种拼写请求就能绕过它，把活会话的目录删掉。
-  // 子代理后代也要过同一道闸门，所以传判断函数而不是一个布尔。
+  // 两种拼写都要查：磁盘上找目录时 `session-<id>` 与 `<id>` 都会被删。
+  // v1.2.0 起这个判断**不再用来拒绝活会话**（删除对活会话同样执行，先停 agent 再删目录），
+  // 只用来在结果里如实标注 `wasLive` / `liveDescendants`；所以传判断函数而不是一个布尔。
   const isLive = (id) => findLiveSession(sessions, id) !== undefined
   const result = await deleteSession({
     sessionsRoot: sessionsRoot(),

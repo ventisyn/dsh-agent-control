@@ -558,8 +558,13 @@ test('运行中的 assistant 按钮禁用且不派发请求', () => {
  */
 let lastSessionsService
 
-/** 造一个只实现 client.js 真正用到的那几个成员的假 ctx。 */
-function makeContext() {
+/**
+ * 造一个只实现 client.js 真正用到的那几个成员的假 ctx。
+ *
+ * @param {Record<string, unknown>} [services] - 要由 `ctx.get(name)` 直接给出的服务
+ *   （例如 `uiWorkspace` / `workspaces`：删除后「切走」那一步要用）。
+ */
+function makeContext(services = {}) {
   registrations.length = 0
   serviceInjections.length = 0
   slotInjections.length = 0
@@ -567,7 +572,7 @@ function makeContext() {
   lastSessionsService = { refresh: () => { lastSessionsService.refreshed += 1 } }
   lastSessionsService.refreshed = 0
   return {
-    get: () => undefined,
+    get: (name) => services[name],
     inject(names, callback) {
       serviceInjections.push(...names)
       callback({
@@ -1195,12 +1200,14 @@ function captureReload(t) {
 /**
  * 把弹窗挂到「确认删除某个会话」这一步，返回确认框。
  *
- * 走的是真实链路：先 GET /sessions 复核目标存在且不 live，再 POST /session/delete，
+ * 走的是真实链路：先 GET /sessions 复核目标存在，再 POST /session/delete，
  * 所以 `respond` 只需要按 URL 分流。
+ *
+ * @param {Record<string, unknown>} [services] - 直接交给 `ctx.get(name)` 的服务。
  */
-async function mountSessionDeleteDialog(t, respond, sessionId = 'session-77') {
+async function mountSessionDeleteDialog(t, respond, sessionId = 'session-77', services = {}) {
   const browser = captureBrowser(t, respond)
-  loaded.apply(makeContext())
+  loaded.apply(makeContext(services))
   const dialog = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(dialog.component, { t: (key) => key })
   const onRequest = browser.listeners
@@ -1232,6 +1239,70 @@ test('删除会话后就地刷新列表：调用 sessions.refresh()，不做整�
   assert.equal(settled, undefined, '成功后弹窗应当关闭')
 })
 
+test('活会话不再被前端拦住：live=true 也照发 POST', async (t) => {
+  // v1.2.0 起「本次启动后打开过」不再是拒绝理由（host 会先停 agent 再删目录）。
+  // 前端若还留着那道闸门，用户会看到一个已经不该出现的失败。
+  let posted = 0
+  const { confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) {
+      posted += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, wasLive: true }) }
+    }
+    return okSessions([{ sessionId: 'session-77', live: true }])
+  })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  assert.equal(posted, 1, '★ 活会话也要真的发出删除请求')
+})
+
+test('删掉的正是当前会话时，界面切到同工作区里的另一个会话（照抄归档的让开）', async (t) => {
+  const opened = []
+  const sessions = {
+    refresh: () => {},
+    retainInfo: () => ({ getSnapshot: () => ({ referenceCount: 1, retainedBy: { mainView: 1 } }) }),
+    list: {
+      getSnapshot: () => ({
+        ids: ['session-77', 'session-88', 'session-99'],
+        byId: {
+          'session-77': { id: 'session-77' },
+          'session-88': { id: 'session-88' },
+          'session-99': { id: 'session-99' },
+        },
+      }),
+    },
+  }
+  const workspaces = {
+    list: { getSnapshot: () => ({ items: [{ workspaceId: 'ws-1', sessionIds: ['session-77', 'session-88'] }], archivedSessionIds: [] }) },
+  }
+  const { confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    return okSessions([{ sessionId: 'session-77', live: false }])
+  }, 'session-77', { sessions, workspaces, uiWorkspace: { openSession: (id) => opened.push(id) } })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  // 同工作区的 session-88 顶上；session-99 属于别的工作区，不该被挑中。
+  // 这一步同时会把持久化的「当前会话」改掉——归档之所以「切走就不会再回来」靠的就是它，
+  // 也是「打开过的会话也能删」在重启后不会再被打开的关键。
+  assert.deepEqual(opened, ['session-88'], '★ 必须让开到同工作区的另一个会话')
+})
+
+test('删的不是当前会话时，界面一动不动（别把用户正在看的会话拽走）', async (t) => {
+  const opened = []
+  const sessions = { refresh: () => {}, retainInfo: () => ({ getSnapshot: () => ({ referenceCount: 0, retainedBy: {} }) }) }
+  const { confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    return okSessions([{ sessionId: 'session-77', live: false }])
+  }, 'session-77', { sessions, uiWorkspace: { openSession: (id) => opened.push(id) } })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  assert.deepEqual(opened, [], '★ 不是当前会话就不许乱跳')
+})
 test('列表刷新拿不到服务时退回整页重载（宁可重载，也不留过时列表）', async (t) => {
   // 服务不在、或 refresh() 抛错时只 catch 不重载，侧栏会一直显示一个已经不存在的会话。
   const reload = captureReload(t)

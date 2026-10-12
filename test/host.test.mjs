@@ -196,8 +196,7 @@ test('请求体超过上限：400 INVALID_REQUEST', async () => {
   assert.deepEqual(host.errors, [])
 })
 
-test('活会话闸门两种拼写都查：用另一种拼写请求也会被 SESSION_LIVE 拒绝', async (t) => {
-  // 找目录时两种拼写都会被删；闸门只查一种的话，换个拼写就能把活会话的目录删掉。
+test('活会话经路由也能删掉：另一种拼写指向同一个会话，响应里如实标 wasLive', async (t) => {
   const home = tempHome(t)
   const dir = makeSessionDir(home, 'session-abc')
   const live = { id: 'session-abc' }
@@ -205,9 +204,9 @@ test('活会话闸门两种拼写都查：用另一种拼写请求也会被 SESS
 
   const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'abc' }) })
 
-  assert.equal(response.status, 409)
-  assert.equal(response.body.error.code, ERROR_CODES.sessionLive)
-  assert.equal(existsSync(dir), true, '★ 被拒绝时活会话的目录必须原样保留')
+  assert.equal(response.status, 200)
+  assert.equal(response.body.wasLive, true, '内存里还活着这件事要如实回报')
+  assert.equal(existsSync(dir), false, '★ 活会话的目录也要真的删掉')
 })
 
 test('删除成功的响应里 detached 反映真实的记账结果', async (t) => {
