@@ -1331,6 +1331,28 @@ test('主视图的引用在删除之后才放开时（真机就是这样），�
   assert.deepEqual(opened, ['session-88'], '★ 判断要在删除前做，否则会漏判、停在空白页')
 })
 
+test('删的会话其实早就没了（TARGET_NOT_FOUND）时，仍然刷新列表——那一行才是过时的', async (t) => {
+  // 真机踩过：一个早已删掉的会话在「未分组」里赖着不走，点删除只看到「目标已经不存在了」，
+  // 而行一直在——因为失败路径没有刷新列表，用户每点一次都只是再看一遍同一句话。
+  const failure = {
+    ok: false,
+    status: 404,
+    json: async () => ({ ok: false, error: { code: 'TARGET_NOT_FOUND', message: '找不到会话 session-77' } }),
+  }
+  const { dialog, confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) return failure
+    return okSessions([{ sessionId: 'session-77', live: false }])
+  })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  assert.equal(lastSessionsService.refreshed, 1, '★ 目标已经不存在时更要刷新列表')
+  const after = renderUntilStable(dialog.component, { t: (key) => key })
+  const still = findElement(after, (element) => element.type?.name === 'RiskConfirmation')
+  assert.ok(still, '失败仍然要说清楚（弹窗保持打开）')
+})
+
 test('uiWorkspace 取不到（cordis 的 without inject 会抛错）时，删除仍然算成功', async (t) => {
   // 真机踩过：cordis 对没 inject 的服务做**属性访问**会抛 `cannot get property "uiWorkspace" without inject`，
   // 那个异常一路冒进弹窗，于是「删除明明已经成功」被显示成「删除失败」。让开主视图只是体验补救，

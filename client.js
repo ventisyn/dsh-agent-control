@@ -2085,6 +2085,10 @@ let clientCtx
           // 轮次删除失败也可能已经改变了模型可见面（例如墓碑已追加、只是没落盘），
           // 让标记按服务端的真实答案重新判断一次，界面与模型才一致。
           if (target.kind !== 'session') announceTurnsChanged(target.sessionId)
+          // 会话删除报「目标已经不存在了」时，**侧栏那一行才是过时的那个**：磁盘目录早没了，
+          // 列表没跟上而已。这时候更要刷新一次——否则用户每点一次都只看到同一句失败，
+          // 行却一直挂在那里（真机踩过：一个早已删掉的会话在「未分组」里赖着不走）。
+          if (target.kind === 'session' && failure?.code === 'TARGET_NOT_FOUND') refreshSessionList()
           setError(describeError(failure))
         } finally {
           setBusy(false)
