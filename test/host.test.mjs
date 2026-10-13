@@ -913,6 +913,57 @@ test('★ 重启在写完 spec.json 之后被取消（派生辅助进程抛错�
 })
 
 // ---------------------------------------------------------------------------
+// 取消重启时，已经派生出去的辅助进程必须一并停掉
+// ---------------------------------------------------------------------------
+
+test('★ 辅助进程已派生、随后重启被取消（appExit 抛错）：辅助进程被终止，不会在 30 秒后硬杀仍在运行的旧进程', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const dir = restartDir(home)
+  const background = []
+  const killed = []
+  const { ctx } = makeToolContext()
+  const deps = makeRestartDeps(ctx, {
+    dshHome: home,
+    schedule: (fn) => { background.push(fn) },
+    spawn: () => ({ pid: 4242, unref() {}, kill: (signal) => { killed.push(signal ?? 'default'); return true } }),
+    appExit: () => { throw new Error('宿主拒绝退出') },
+  })
+
+  await requestRestart(ctx, deps, { source: 'ui', reason: '测试取消现场', force: true })
+  await background.shift()()
+
+  const last = readLast(dir)
+  assert.equal(last.stage, 'cancelled')
+  assert.match(last.error, /宿主拒绝退出/)
+  assert.equal(killed.length, 1, '★ 取消说「进程没有退出」，那辅助进程就不能还在等着去硬杀旧进程')
+  assert.equal(existsSync(path.join(dir, 'spec.json')), false)
+  assert.equal(readPending(dir), undefined)
+  // 单飞锁已释放：同一个进程里可以再发起（限频放行第二次）。
+  const again = await requestRestart(ctx, deps, { source: 'ui', reason: '再来一次', force: true })
+  assert.equal(typeof again.restartId, 'string')
+})
+
+test('取消时辅助进程的 kill 本身抛错：只记日志，取消流程照常完成', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const dir = restartDir(home)
+  const background = []
+  const { ctx } = makeToolContext()
+  const deps = makeRestartDeps(ctx, {
+    dshHome: home,
+    schedule: (fn) => { background.push(fn) },
+    spawn: () => ({ pid: 4243, unref() {}, kill: () => { throw new Error('ESRCH') } }),
+    appExit: () => { throw new Error('宿主拒绝退出') },
+  })
+
+  await requestRestart(ctx, deps, { source: 'ui', reason: '测试取消现场', force: true })
+  await background.shift()()
+
+  assert.equal(readLast(dir).stage, 'cancelled')
+})
+
+// ---------------------------------------------------------------------------
 // 幽灵会话经路由：200 + ghost: true，并通知界面
 // ---------------------------------------------------------------------------
 

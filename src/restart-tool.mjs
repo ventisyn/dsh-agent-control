@@ -882,6 +882,8 @@ async function restartSequence(ctx, deps, state) {
     windowsHide: true,
   })
   if (typeof child?.unref === 'function') child.unref()
+  // 记下辅助进程：派生之后再取消（写 pending 失败 / appExit 抛错或缺失），必须能把它停掉（见 cancelRestart）。
+  state.helper = child
 
   const withHelper = { ...state.entry, state: PENDING_STATES.helperStarted }
   writePending(deps.dir, withHelper)
@@ -923,6 +925,9 @@ async function cancelRestart(ctx, deps, state, reason) {
   // 启动规格里有完整的环境变量快照，约定「用完即删」且由**新进程**负责删——可这次取消了，不会有新进程，
   // 它会一直留在盘上（直到某次未来的启动做过期清理）。取消时自己删：单飞锁保证此刻没有别的重启在用它。
   safeCall(() => removeFile(path.join(deps.dir, SPEC_FILE)))
+  // 辅助进程已经派生出去的话也要停掉：它会等旧进程退出，等不到就在 30 秒后**硬杀**旧进程再起新的——
+  // 而这里正要对用户说「进程没有退出」。不停它，取消就成了一句谎话（还会丢掉续作）。
+  stopHelper(ctx, state)
   const now = deps.now()
   const patch = {
     restartId: state.restartId,
@@ -954,6 +959,19 @@ async function cancelRestart(ctx, deps, state, reason) {
   const line = `${PLUGIN_NAME}: 重启 ${state.restartId} 已取消：${reason}`
   if (written.ok === true) ctx.logger?.warn?.(line)
   else ctx.logger?.error?.(`${line}（写 last.json 也失败了：${written.message}）`)
+}
+
+/** 终止已经派生出去的辅助进程（尽力而为，失败只记日志，不影响取消流程）。 */
+function stopHelper(ctx, state) {
+  const helper = state?.helper
+  if (helper === undefined || helper === null || typeof helper.kill !== 'function') return
+  state.helper = undefined
+  try {
+    helper.kill()
+    ctx.logger?.warn?.(`${PLUGIN_NAME}: 重启 ${state.restartId} 已取消，已终止它派生的辅助进程（pid=${helper.pid ?? '未知'}）`)
+  } catch (error) {
+    ctx.logger?.warn?.(`${PLUGIN_NAME}: 重启 ${state.restartId} 已取消，但终止辅助进程失败（它可能仍会在超时后硬杀旧进程）：${describeError(error)}`)
+  }
 }
 
 /**
