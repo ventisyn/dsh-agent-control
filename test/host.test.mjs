@@ -6,11 +6,12 @@
  * 会话目录全部建在临时目录里（`DSH_HOME` 指过去），**绝不触碰真实 profile**。
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { ERROR_CODES, PATHS, statusForCode } from '../src/shared.mjs'
 import { PENDING_MAX_AGE_MS, readLast, readPending, restartDir, writeLast, writePending } from '../src/restart.mjs'
@@ -430,6 +431,109 @@ test('删会话时通过 storageDomain 的公开表接口清掉投影缓存', as
   assert.equal(response.status, 200)
   assert.deepEqual(deleted.sort(), ['cache1', 'session-cache1'], '两种拼写都要删')
   assert.deepEqual(response.body.projectionCache.removed, ['session-cache1'])
+})
+
+// ---------------------------------------------------------------------------
+// 回归：id 为 "." / "session-" / "session-." 时，删除不得命中整个 slug 目录
+// ---------------------------------------------------------------------------
+
+/** 仓库根目录：这组用例的 DSH_HOME 夹具建在这里的一次性目录里，不依赖 os.tmpdir()。 */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+let fixtureSeq = 0
+
+/** 在仓库工作区里造一个一次性 DSH_HOME（`*.tmp` 已被 .gitignore 忽略），结束后还原环境变量并删掉。 */
+function workspaceHome(t) {
+  fixtureSeq += 1
+  const home = path.join(REPO_ROOT, `.fixture-host-${process.pid}-${fixtureSeq}.tmp`)
+  mkdirSync(path.join(home, 'sessions'), { recursive: true })
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+  })
+  return home
+}
+
+/** 在两个 slug 下造会话目录（含三种合法拼写），返回全部目录路径（已排序）。 */
+function seedDangerousFixture(home) {
+  const make = (slug, name) => {
+    const dir = path.join(home, 'sessions', slug, name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), 'stub', 'utf8')
+    return dir
+  }
+  return [
+    make('--D-work-alpha--', '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721'),
+    make('--D-work-alpha--', 'session-58a6c1c1-074e-4fcb-af54-04a234428ad3'),
+    make('--D-work-alpha--', 'session-7'),
+    make('--D-work-beta--', 'aa11bb22-0000-0000-0000-000000000099'),
+  ].sort()
+}
+
+/** sessions 根下「slug/会话目录」两级的快照（排序）。 */
+function snapshotHomeSessions(home) {
+  const sessions = path.join(home, 'sessions')
+  const out = []
+  for (const slug of readdirSync(sessions, { withFileTypes: true })) {
+    if (!slug.isDirectory()) continue
+    for (const entry of readdirSync(path.join(sessions, slug.name), { withFileTypes: true })) {
+      if (entry.isDirectory()) out.push(path.join(sessions, slug.name, entry.name))
+    }
+  }
+  return out.sort()
+}
+
+test('★ POST /session/delete："." / "session-" / "session-." 一律 400 INVALID_REQUEST，所有工作区的会话目录原封不动', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] } })
+
+  for (const sessionId of ['.', 'session-', 'session-.']) {
+    const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId }) })
+    assert.equal(response.status, 400, `${JSON.stringify(sessionId)} 必须 400`)
+    assert.equal(response.body.error.code, ERROR_CODES.invalidRequest)
+    assert.deepEqual(snapshotHomeSessions(home), seeded, `★ ${JSON.stringify(sessionId)} 被拒之后一个会话目录都不能少`)
+  }
+  assert.deepEqual(host.errors, [], '参数错误不是内部故障')
+})
+
+test('GET /turns 与 POST /turn/delete 同样拒绝这三个 id（共用 assertSessionId）', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] } })
+
+  for (const sessionId of ['.', 'session-', 'session-.']) {
+    const listed = await call(host, PATHS.turns, { method: 'GET', query: `?sessionId=${encodeURIComponent(sessionId)}` })
+    assert.equal(listed.status, 400)
+    assert.equal(listed.body.error.code, ERROR_CODES.invalidRequest)
+    const deleted = await call(host, PATHS.turnDelete, { body: JSON.stringify({ sessionId, assistantMessageId: 'm1' }) })
+    assert.equal(deleted.status, 400)
+    assert.equal(deleted.body.error.code, ERROR_CODES.invalidRequest)
+  }
+  assert.deepEqual(snapshotHomeSessions(home), seeded)
+})
+
+test('合法 id 经路由仍能删除：UUID、session-<UUID>、session-<n>，别的工作区的会话不受影响', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] } })
+  const remaining = new Set(seeded)
+
+  for (const [sessionId, dirName] of [
+    ['1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721', '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721'],
+    ['session-58a6c1c1-074e-4fcb-af54-04a234428ad3', 'session-58a6c1c1-074e-4fcb-af54-04a234428ad3'],
+    ['session-7', 'session-7'],
+  ]) {
+    const target = seeded.find((dir) => path.basename(dir) === dirName)
+    const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId }) })
+    assert.equal(response.status, 200, `${sessionId} 必须删得掉`)
+    assert.deepEqual(response.body.removed, [target])
+    remaining.delete(target)
+    assert.deepEqual(snapshotHomeSessions(home), [...remaining].sort())
+  }
+  assert.equal(snapshotHomeSessions(home).length, 1, '另一个工作区的会话还在')
 })
 
 // ---------------------------------------------------------------------------

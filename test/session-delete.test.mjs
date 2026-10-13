@@ -5,13 +5,14 @@
  * 重点覆盖：两种 id 拼写、活会话被拒、删不净就不解除记账、记账不可用如实回报。
  */
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { zstdCompressSync } from 'node:zlib'
 
-import { ERROR_CODES, sessionDirNames } from '../src/shared.mjs'
+import { ERROR_CODES, assertSessionId, sessionDirNames } from '../src/shared.mjs'
 import {
   deleteSession,
   detachFromWorkspaces,
@@ -464,4 +465,125 @@ test('读不出会话头的目录不会被当成后代删掉，并给出说明',
   const lineage = findSubagentDescendants(sessions, 'session-p3')
   assert.deepEqual(lineage.descendants, [])
   assert.match(lineage.warnings.join('\n'), /1 个会话目录读不出会话头/)
+})
+
+// ---------------------------------------------------------------------------
+// 回归：id 为 "." / "session-" / "session-." 时，不得命中整个 slug 目录
+// ---------------------------------------------------------------------------
+
+/** 仓库根目录：这组用例的夹具建在这里的一次性目录里，不依赖 os.tmpdir()。 */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+/** 一次性夹具目录的序号：同一进程里多个用例各取各的，互不覆盖。 */
+let fixtureSeq = 0
+
+/** 在仓库工作区里造一个一次性 `sessions` 根；用例结束即删（`*.tmp` 已被 .gitignore 忽略）。 */
+function workspaceSessionsRoot(t) {
+  fixtureSeq += 1
+  const root = path.join(REPO_ROOT, `.fixture-session-delete-${process.pid}-${fixtureSeq}.tmp`)
+  const sessions = path.join(root, 'sessions')
+  mkdirSync(sessions, { recursive: true })
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  return sessions
+}
+
+/** 两个 slug 下各放几个会话目录（含 UUID、session-<UUID>、session-<n> 三种合法拼写），返回全部目录路径。 */
+function seedTwoWorkspaces(sessions) {
+  return [
+    makeSessionDir(sessions, '--D-work-alpha--', '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721'),
+    makeSessionDir(sessions, '--D-work-alpha--', 'session-58a6c1c1-074e-4fcb-af54-04a234428ad3'),
+    makeSessionDir(sessions, '--D-work-alpha--', 'session-7'),
+    makeSessionDir(sessions, '--D-work-beta--', 'aa11bb22-0000-0000-0000-000000000099'),
+    makeSessionDir(sessions, '--D-work-beta--', 'session-8'),
+  ].sort()
+}
+
+/** 盘上 sessions 根下「slug/会话目录」两级的快照（排序），用来断言「一个都不少」。 */
+function snapshotSessionDirs(sessions) {
+  const out = []
+  for (const slug of readdirSync(sessions, { withFileTypes: true })) {
+    if (!slug.isDirectory()) continue
+    for (const entry of readdirSync(path.join(sessions, slug.name), { withFileTypes: true })) {
+      if (entry.isDirectory()) out.push(path.join(sessions, slug.name, entry.name))
+    }
+  }
+  return out.sort()
+}
+
+const DANGEROUS_IDS = ['.', 'session-', 'session-.']
+
+test('assertSessionId 拒绝 "." / "session-" / "session-."（INVALID_REQUEST），并保留 ".." 与长度检查', () => {
+  for (const id of [...DANGEROUS_IDS, '..', 'session-..', '-a', '.a', 'a/b', 'a\\b', 'a'.repeat(201)]) {
+    assert.throws(() => assertSessionId(id), (error) => error.code === ERROR_CODES.invalidRequest, `${JSON.stringify(id)} 必须被拒`)
+  }
+  // 合法拼写不能回归。
+  for (const id of ['1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721', 'session-58a6c1c1-074e-4fcb-af54-04a234428ad3', 'session-7', 'abc', 'a.b_c:d']) {
+    assert.equal(assertSessionId(id), id)
+  }
+})
+
+test('sessionDirNames 不产出空串、"."、".." 或含路径分隔符的名字', () => {
+  for (const id of [...DANGEROUS_IDS, '..', 'session-..', 'a/b', 'a\\b']) {
+    for (const name of sessionDirNames(id)) {
+      assert.notEqual(name, '', `${JSON.stringify(id)} 不能产出空串`)
+      assert.notEqual(name, '.')
+      assert.notEqual(name, '..')
+      assert.doesNotMatch(name, /[\\/]/)
+    }
+  }
+  assert.deepEqual(sessionDirNames('session-'), ['session-'], '去前缀后的空串被滤掉')
+  assert.deepEqual(sessionDirNames('.'), ['session-.'], '"." 本身被滤掉')
+  assert.deepEqual(sessionDirNames('session-.'), ['session-.'], '去前缀后的 "." 被滤掉')
+  // 合法拼写照旧两种都在。
+  assert.deepEqual(sessionDirNames('session-7'), ['session-7', '7'])
+  assert.deepEqual(sessionDirNames('abc'), ['abc', 'session-abc'])
+})
+
+test('★ 绕过校验直接调 findSessionDirs：三个危险 id 找不到任何目录', (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  seedTwoWorkspaces(sessions)
+  for (const id of [...DANGEROUS_IDS, '..', '']) {
+    assert.deepEqual(findSessionDirs(sessions, id), [], `${JSON.stringify(id)} 不能命中任何目录（尤其不能命中 slug 目录本身）`)
+  }
+})
+
+test('★ 绕过校验直接调 deleteSession：三个危险 id 都是 TARGET_NOT_FOUND，别的会话目录一个都不少', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const seeded = seedTwoWorkspaces(sessions)
+  const calls = []
+  const workspaceRegistry = {
+    list: () => [{ id: 'ws', sessionIds: DANGEROUS_IDS, detachSession: async (id) => { calls.push(`detach:${id}`) } }],
+  }
+  const agents = { get: () => ({ status: 'running', cancel: () => calls.push('cancel'), whenIdle: async () => {} }) }
+
+  for (const id of DANGEROUS_IDS) {
+    await assert.rejects(
+      () => deleteSession({ sessionsRoot: sessions, agents, workspaceRegistry }, id),
+      (error) => error.code === ERROR_CODES.targetNotFound,
+      `${JSON.stringify(id)} 必须 TARGET_NOT_FOUND`,
+    )
+    assert.deepEqual(snapshotSessionDirs(sessions), seeded, `★ 删 ${JSON.stringify(id)} 之后别的会话目录一个都不能少`)
+  }
+  assert.deepEqual(calls, [], '找不到就不能有任何副作用（不停 agent、不动记账）')
+})
+
+test('合法 id 仍能正常删除：UUID、session-<UUID>、session-<n>，且只删各自那一个', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const seeded = seedTwoWorkspaces(sessions)
+  const remaining = new Set(seeded)
+  for (const [id, dirName] of [
+    ['1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721', '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721'],
+    ['session-58a6c1c1-074e-4fcb-af54-04a234428ad3', 'session-58a6c1c1-074e-4fcb-af54-04a234428ad3'],
+    ['session-7', 'session-7'],
+    // 另一种拼写也要认：请求裸 `8`，磁盘上是 `session-8`。
+    ['8', 'session-8'],
+  ]) {
+    assertSessionId(id)
+    const target = seeded.find((dir) => path.basename(dir) === dirName)
+    const result = await deleteSession({ sessionsRoot: sessions }, id)
+    assert.deepEqual(result.removed, [target])
+    remaining.delete(target)
+    assert.deepEqual(snapshotSessionDirs(sessions), [...remaining].sort(), `删 ${id} 只能少它自己`)
+  }
+  assert.deepEqual(snapshotSessionDirs(sessions), [seeded.find((dir) => path.basename(dir) === 'aa11bb22-0000-0000-0000-000000000099')])
 })

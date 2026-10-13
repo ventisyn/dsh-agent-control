@@ -56,8 +56,12 @@ export function findSessionDirs(sessionsRoot, sessionId) {
   }
   for (const slug of slugs) {
     if (!slug.isDirectory()) continue
+    const slugDir = path.join(sessionsRoot, slug.name)
     for (const name of names) {
-      const candidate = path.join(sessionsRoot, slug.name, name)
+      const candidate = path.join(slugDir, name)
+      // 第三道防线（兜底）：候选必须恰好是 slug 目录下名为 name 的**直接子目录**。
+      // name 为 "" / "." 时 join 出来就是 slug 目录本身，会把整个工作区的会话一起交给 rmSync。
+      if (path.dirname(candidate) !== slugDir || path.basename(candidate) !== name) continue
       if (isDirectory(candidate)) found.add(candidate)
     }
   }

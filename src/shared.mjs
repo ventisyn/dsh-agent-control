@@ -149,7 +149,19 @@ export function sessionDirNames(sessionId) {
   const names = [id]
   if (id.startsWith('session-')) names.push(id.slice('session-'.length))
   else names.push(`session-${id}`)
-  return [...new Set(names)]
+  // 第二道防线：去前缀后可能得到空串，`.` 与 `..` 拼进路径会指回 slug 目录本身或上一级，
+  // 路径分隔符会让名字不再是单层目录名——这些都不是会话目录名，一律滤掉（见 findSessionDirs 的兜底校验）。
+  return [...new Set(names)].filter(isSafeDirName)
+}
+
+/**
+ * 候选名能不能当「单层目录名」用：非空、不是 `.` / `..`、不含路径分隔符。
+ *
+ * @param {string} name - 候选目录名。
+ * @returns {boolean} 安全才为 true。
+ */
+function isSafeDirName(name) {
+  return name !== '' && name !== '.' && name !== '..' && !/[\\/]/.test(name)
 }
 
 /**
@@ -171,7 +183,13 @@ export function assertSessionId(value) {
     throw new ControlError(ERROR_CODES.invalidRequest, 'sessionId 过长')
   }
   // 只允许 id 该有的字符：路径分隔符、空白、`..` 一律拒绝，避免拼出目录穿越。
-  if (!/^[A-Za-z0-9._:-]+$/.test(id) || id.includes('..')) {
+  // 首字符必须是字母或数字：`.` 这类 id 拼进路径会指回 slug 目录本身，被当成会话目录整个删掉。
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(id) || id.includes('..')) {
+    throw new ControlError(ERROR_CODES.invalidRequest, `sessionId 形状非法：${id}`)
+  }
+  // 去掉 `session-` 前缀后的部分才是磁盘上的另一种拼写，它同样必须以字母或数字开头
+  // （`session-`、`session-.` 去前缀后是空串与 `.`，同样会指回 slug 目录）。
+  if (id.startsWith('session-') && !/^[A-Za-z0-9]/.test(id.slice('session-'.length))) {
     throw new ControlError(ERROR_CODES.invalidRequest, `sessionId 形状非法：${id}`)
   }
   return id
