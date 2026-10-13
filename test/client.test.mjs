@@ -1375,6 +1375,51 @@ test('uiWorkspace 取不到（cordis 的 without inject 会抛错）时，删除
   assert.equal(still, undefined, '★ 取不到 uiWorkspace 不该把成功的删除显示成失败')
 })
 
+test('删除会顺手把目标从工作区记账里摘掉——切走的目标必须删前就定好', async (t) => {
+  // 真机踩过：删完再算「同工作区的下一个」，账里已经没有它了 → 找不到工作区 → 退化成
+  // `startSession(undefined)`，用户落在一个「未分组」的新空会话里。方案必须在删除前算完。
+  const opened = []
+  const started = []
+  let deleted = false
+  const sessions = {
+    refresh: () => {},
+    retainInfo: () => ({ getSnapshot: () => ({ referenceCount: 1, retainedBy: { mainView: 1 } }) }),
+    list: {
+      getSnapshot: () => ({
+        ids: deleted ? ['session-88'] : ['session-77', 'session-88'],
+        byId: deleted
+          ? { 'session-88': { id: 'session-88' } }
+          : { 'session-77': { id: 'session-77' }, 'session-88': { id: 'session-88' } },
+      }),
+    },
+  }
+  const workspaces = {
+    list: {
+      getSnapshot: () => ({
+        items: [{ workspaceId: 'ws-1', sessionIds: deleted ? [] : ['session-77', 'session-88'] }],
+        archivedSessionIds: [],
+      }),
+    },
+  }
+  const { confirmBox } = await mountSessionDeleteDialog(t, (url) => {
+    if (url.includes('/session/delete')) {
+      deleted = true
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+    return okSessions([{ sessionId: 'session-77', live: false }])
+  }, 'session-77', {
+    sessions,
+    workspaces,
+    uiWorkspace: { openSession: (id) => opened.push(id), startSession: (id) => started.push(id) },
+  })
+
+  await confirmBox.props.onConfirm()
+  await flush()
+
+  assert.deepEqual(opened, ['session-88'], '★ 记账被摘掉之后也算得出同工作区的下一个')
+  assert.deepEqual(started, [], '★ 不该退化成「新开一个未分组的空会话」')
+})
+
 test('删的不是当前会话时，界面一动不动（别把用户正在看的会话拽走）', async (t) => {
   const opened = []
   const sessions = { refresh: () => {}, retainInfo: () => ({ getSnapshot: () => ({ referenceCount: 0, retainedBy: {} }) }) }

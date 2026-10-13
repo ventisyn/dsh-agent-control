@@ -2060,14 +2060,15 @@ let clientCtx
         setError(null)
         try {
           if (target.kind === 'session') {
-            // ⚠️ 必须在**删除请求之前**问：删掉之后主视图对它的引用会随列表更新一起放开，
-            // 那时候再问 `mainView` 计数已经变成 0，于是「删的是当前会话」这个判断会漏掉，
-            // 用户就停在一片空白上（真机踩过：删完只看到「选择一个工作区开始」）。
-            const wasCurrent = isMainViewSession(target.sessionId)
+            // ⚠️ 让开主视图要用的东西必须在**删除请求之前**全部算出来——删除会把它们全都改掉：
+            //   · 主视图对它的引用会随列表更新一起放开（`mainView` 计数归零）→「删的是当前会话」漏判；
+            //   · 它会被从工作区记账里摘掉 → 「它属于哪个工作区」「同工作区还有谁」当场就查不到了，
+            //     于是新开一个「未分组」的空会话（真机踩过的第二种形态）。
+            const switchPlan = planSwitchAway(target.sessionId)
             setResolving(true)
             await deleteSession(target)
             setResolving(false)
-            switchAwayFromDeletedSession(target.sessionId, wasCurrent)
+            switchAwayFromDeletedSession(switchPlan)
             refreshSessionList()
           } else {
             await callHost(API.turnDelete, {
@@ -2498,20 +2499,39 @@ let clientCtx
    * 「删除失败」（真机踩过：cordis 对没 `inject` 的服务做属性访问会抛 `cannot get property … without inject`，
    * 于是删除明明成功、弹窗却报错）。取 `uiWorkspace` 也必须走安全的 `ctx.get()`，属性访问只当兜底。
    *
-   * ⚠️ 「是不是当前会话」必须在**删除请求之前**问（见确认回调里的注释）：删除之后主视图的引用会随
-   * 列表更新一起放开，再问就永远是 0。所以判断与让开拆成两步，判断结果由调用方带进来。
+   * ⚠️ 要用的东西**全部来自删除前算好的 `plan`**（见 `planSwitchAway`）：删除之后主视图的引用放开了、
+   * 工作区记账里也没有它了，那时候再问什么都问不出来。
    *
-   * @param {string} sessionId - 刚被删掉的会话 id。
-   * @param {boolean} wasCurrent - 删除前它是否正被主视图持有。
+   * @param {{ wasCurrent: boolean, nextSessionId?: string, workspaceId?: string }} plan - 删除前算好的方案。
    */
-  function switchAwayFromDeletedSession(sessionId, wasCurrent) {
-    if (wasCurrent !== true) return
+  function switchAwayFromDeletedSession(plan) {
+    if (plan?.wasCurrent !== true) return
     try {
       const ui = lookupUiWorkspace()
       if (ui === undefined || ui === null) return
-      openNextAfterDelete(ui, sessionId)
+      openNextAfterDelete(ui, plan)
     } catch {
       // 让开失败只是体验降级：删除已经成功，绝不因此报错。
+    }
+  }
+
+  /**
+   * 删除**之前**把「删完该切到哪」整个算出来。
+   *
+   * 这三件事都必须在删除请求之前问，删除会把它们一一改掉：
+   *   1. `isMainViewSession()`——删除之后主视图的引用会随列表更新一起放开，再问永远是 0；
+   *   2. 同工作区的下一个会话——目标会被从工作区记账里摘掉，那时已经找不到它的工作区了；
+   *   3. 它所属的工作区 id——同上，找不到就会退化成「新开一个未分组的空会话」（真机踩过）。
+   *
+   * @param {string} sessionId - 即将被删掉的会话 id。
+   * @returns {{ wasCurrent: boolean, nextSessionId?: string, workspaceId?: string }} 删完照着做的方案。
+   */
+  function planSwitchAway(sessionId) {
+    if (!isMainViewSession(sessionId)) return { wasCurrent: false }
+    return {
+      wasCurrent: true,
+      nextSessionId: pickNextSessionId(sessionId),
+      workspaceId: workspaceIdOfSession(sessionId),
     }
   }
 
@@ -2545,11 +2565,10 @@ let clientCtx
    * @param {any} ui - 客户端 `uiWorkspace`。
    * @param {string} sessionId - 刚被删掉的会话 id。
    */
-  function openNextAfterDelete(ui, sessionId) {
-    const next = pickNextSessionId(sessionId)
-    if (next !== undefined && typeof ui.openSession === 'function') {
+  function openNextAfterDelete(ui, plan) {
+    if (plan.nextSessionId !== undefined && typeof ui.openSession === 'function') {
       try {
-        ui.openSession(next)
+        ui.openSession(plan.nextSessionId)
         return
       } catch {
         // 落到 startSession。
@@ -2557,7 +2576,7 @@ let clientCtx
     }
     if (typeof ui.startSession === 'function') {
       try {
-        ui.startSession(workspaceIdOfSession(sessionId))
+        ui.startSession(plan.workspaceId)
       } catch {
         // 让开失败就维持原样：这是体验降级，不是删除失败。
       }
