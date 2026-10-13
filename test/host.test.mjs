@@ -816,6 +816,75 @@ test('不是活会话：根本没有归档这一步，也就没有回滚', async
 })
 
 // ---------------------------------------------------------------------------
+// 回滚用例补齐：AGENT_BUSY / DELETE_FAILED 两种失败原因，以及 unarchiveSession 同步抛错
+// ---------------------------------------------------------------------------
+
+test('★ 删除失败（AGENT_BUSY：agent 停不下来）：归档标记被撤回，423 原样返回，目录没被硬删', async (t) => {
+  const home = workspaceHome(t)
+  const dir = makeSessionDir(home, 'session-abc')
+  const { registry, calls, archived } = fakeArchiveRegistry()
+  const live = { id: 'session-abc' }
+  // 停止超时通过 host.stopTimeoutMs 注入成很小的值；agent 永远不 idle，模拟卡住。
+  const host = makeHost({
+    sessions: { get: (id) => (id === 'session-abc' ? live : undefined), list: () => [live] },
+    workspaceRegistry: registry,
+    agents: { get: () => ({ status: 'running', cancel: () => {}, whenIdle: () => new Promise(() => {}) }) },
+  }, { host: { stopTimeoutMs: 30 } })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 423)
+  assert.equal(response.body.error.code, ERROR_CODES.agentBusy, '★ 原来的错误必须原样返回')
+  assert.deepEqual(calls.map((c) => c.op), ['archive', 'unarchive'], '先归档藏行，agent 停不下来后撤回')
+  assert.equal(archived.size, 0, '★ 失败之后不能还留着那条隐藏标记')
+  assert.equal(existsSync(dir), true, '停不下来时不得硬删目录')
+})
+
+test('★ 删除失败（DELETE_FAILED：内部故障）：归档标记被撤回，500 与原始信息原样返回并记 error 日志', async (t) => {
+  const home = workspaceHome(t)
+  const dir = makeSessionDir(home, 'session-abc')
+  const { registry, calls, archived } = fakeArchiveRegistry()
+  const live = { id: 'session-abc' }
+  // 注入一个会抛普通 Error 的 agent 注册表：deleteSession 里没有错误码的异常一律归 DELETE_FAILED。
+  const host = makeHost({
+    sessions: { get: (id) => (id === 'session-abc' ? live : undefined), list: () => [live] },
+    workspaceRegistry: registry,
+    agents: { get: () => { throw new Error('agent 注册表坏了') } },
+  })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 500)
+  assert.equal(response.body.error.code, ERROR_CODES.deleteFailed)
+  assert.match(response.body.error.message, /agent 注册表坏了/, '原始信息不能被吞，更不能改写成「任务正在运行」')
+  assert.deepEqual(calls.map((c) => c.op), ['archive', 'unarchive'])
+  assert.equal(archived.size, 0)
+  assert.equal(existsSync(dir), true)
+  assert.ok(host.errors.some((message) => message.includes('agent 注册表坏了')), '内部故障要记 error 日志')
+})
+
+test('★ 回滚里 unarchiveSession 同步抛错（不是返回 rejected promise）：原错误仍原样抛出，只记 warn', async (t) => {
+  workspaceHome(t)
+  const calls = []
+  const registry = {
+    list: () => [],
+    archivedSessionIds: [],
+    archiveSession: async (id) => { calls.push(`archive:${id}`) },
+    // 注意：不是 async 函数——同步 throw，调用处的 `await registry.unarchiveSession()` 必须被 try 包住才接得住。
+    unarchiveSession: (id) => { calls.push(`unarchive:${id}`); throw new Error(`同步抛错 ${id}`) },
+  }
+  const host = makeLiveSessionHost('session-abc', registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 404)
+  assert.equal(response.body.error.code, ERROR_CODES.targetNotFound, '★ 返回的必须还是删除的那个错误')
+  assert.doesNotMatch(response.body.error.message, /同步抛错/, '回滚的错误不许混进响应')
+  assert.deepEqual(calls, ['archive:session-abc', 'unarchive:session-abc', 'unarchive:abc'], '两种拼写都试过')
+  assert.match(host.warnings.join('\n'), /撤回隐藏用的归档标记也失败了/)
+})
+
+// ---------------------------------------------------------------------------
 // 幽灵会话经路由：200 + ghost: true，并通知界面
 // ---------------------------------------------------------------------------
 

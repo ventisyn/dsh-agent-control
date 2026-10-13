@@ -100,7 +100,9 @@ export function apply(ctx, config, host) {
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: PATHS.sessionDelete,
-    handler: wrap(ctx, 'POST', handleDeleteSession),
+    // 停 agent 的等待上限只开一个**可选**注入点（`host.stopTimeoutMs`，仅离线测试用）；生产路径上 host 是 undefined，
+    // 取默认的 DEFAULT_STOP_TIMEOUT_MS，行为不变。
+    handler: wrap(ctx, 'POST', (innerCtx, payload, url, req) => handleDeleteSession(innerCtx, payload, url, req, { stopTimeoutMs: host?.stopTimeoutMs })),
   }), `${PLUGIN_NAME}: POST ${PATHS.sessionDelete}`)
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -370,10 +372,11 @@ async function handleListSessions(ctx) {
  * @param {any} payload - 请求体。
  * @param {URL} _url - 未使用。
  * @param {any} req - node IncomingMessage（要读 headers 做可信校验）。
+ * @param {{ stopTimeoutMs?: number }} [options] - 可选注入（离线测试把停 agent 的超时压小）；缺省取默认值。
  * @returns {Promise<{ status: number, body: any }>} 响应。
  * @throws {ControlError} 校验或删除失败时抛出，由 wrap 映射成 HTTP。
  */
-async function handleDeleteSession(ctx, payload, _url, req) {
+async function handleDeleteSession(ctx, payload, _url, req, options = {}) {
   // 破坏性、不可撤销：先过与 /restart 同口径的两道闸门，再看参数。
   assertTrustedJsonRequest(ctx, req, ERROR_CODES.requestDenied)
   const sessionId = assertSessionId(payload?.sessionId)
@@ -398,7 +401,7 @@ async function handleDeleteSession(ctx, payload, _url, req) {
       isLive,
       workspaceRegistry: ctx.get?.('workspaceRegistry'),
       projectionCache: projectionCacheTable(ctx),
-      stopTimeoutMs: DEFAULT_STOP_TIMEOUT_MS,
+      stopTimeoutMs: options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS,
       keepArchived: hiding.hidden,
     }, sessionId)
   } catch (error) {
