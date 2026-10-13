@@ -186,6 +186,38 @@ export async function pruneOrphanArchives(ctx) {
 }
 
 /**
+ * 所有会改变状态的 POST 路由共用的两道闸门：先可信、后 JSON content-type。
+ *
+ * 自建路由不走 harness 的鉴权链路（AGENTS.md 3.5），而 `<form enctype="text/plain">` 能让别的网页
+ * 跨站发出一个「简单请求」——体里拼出 JSON、content-type 却是 text/plain。所以两道都要：
+ *   1. 可信：宿主 `connection.requestRejection` 的结论优先（401 / 403 照抄），再用本插件自己的
+ *      同源 Origin / 自定义头 `x-dsh-agent-control: 1` 规则兜底（宿主服务不可用时只剩这一道）；
+ *   2. `content-type` 必须是 JSON（跨站表单发不出这个头，除非先过 CORS 预检）。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {any} req - node IncomingMessage（要读 headers）。
+ * @param {string} deniedCode - 不可信时用的错误码（重启 / 关闭 / 删除各用各的，处置文案不同）。
+ * @returns {void}
+ * @throws {ControlError} 不可信（带宿主给的 401 / 403 状态）或不是 JSON 请求（400）时抛出。
+ */
+function assertTrustedJsonRequest(ctx, req, deniedCode) {
+  const rejection = safeCall(() => ctx.get?.('connection')?.requestRejection?.({ headers: req?.headers }))
+  const denied = checkRestartTrust(req?.headers, rejection)
+  if (denied !== undefined) {
+    throw new ControlError(
+      deniedCode,
+      denied === 401
+        ? '这次请求没有通过宿主的鉴权（401）；请从已登录的界面发起，或重新登录后再试'
+        : '这次请求没有通过可信校验（403）：需要一个同源的浏览器请求，或带上 x-dsh-agent-control: 1 头',
+      { status: denied },
+    )
+  }
+  if (!isJsonRequest(req?.headers)) {
+    throw new ControlError(ERROR_CODES.invalidRequest, '只接受 content-type: application/json 的请求')
+  }
+}
+
+/**
  * `GET /api/agent-control/restart/status`：重启现场与最近一次结果。
  *
  * **不做可信校验**：辅助进程要用它当就绪探针（普通 `fetch`，既没有 Origin 也没有自定义头），
@@ -216,20 +248,7 @@ async function handleRestartStatus(ctx, restart) {
  * @throws {ControlError} 拒绝时抛出，由 wrap 映射成 HTTP。
  */
 async function handleRestartRequest(ctx, restart, payload, req) {
-  const rejection = safeCall(() => ctx.get?.('connection')?.requestRejection?.({ headers: req?.headers }))
-  const denied = checkRestartTrust(req?.headers, rejection)
-  if (denied !== undefined) {
-    throw new ControlError(
-      ERROR_CODES.restartDenied,
-      denied === 401
-        ? '这次请求没有通过宿主的鉴权（401）；请从已登录的界面发起，或重新登录后再试'
-        : '这次请求没有通过可信校验（403）：需要一个同源的浏览器请求，或带上 x-dsh-agent-control: 1 头',
-      { status: denied },
-    )
-  }
-  if (!isJsonRequest(req?.headers)) {
-    throw new ControlError(ERROR_CODES.invalidRequest, '只接受 content-type: application/json 的请求')
-  }
+  assertTrustedJsonRequest(ctx, req, ERROR_CODES.restartDenied)
   const rawReason = payload?.reason
   const reason = rawReason === undefined || rawReason === null || (typeof rawReason === 'string' && rawReason.trim() === '')
     ? DEFAULT_UI_REASON
@@ -262,20 +281,7 @@ async function handleRestartRequest(ctx, restart, payload, req) {
  * @throws {ControlError} 拒绝时抛出，由 wrap 映射成 HTTP（403 / 409 / 501）。
  */
 async function handleShutdownRequest(ctx, restart, req) {
-  const rejection = safeCall(() => ctx.get?.('connection')?.requestRejection?.({ headers: req?.headers }))
-  const denied = checkRestartTrust(req?.headers, rejection)
-  if (denied !== undefined) {
-    throw new ControlError(
-      ERROR_CODES.shutdownDenied,
-      denied === 401
-        ? '这次请求没有通过宿主的鉴权（401）；请从已登录的界面发起，或重新登录后再试'
-        : '这次请求没有通过可信校验（403）：需要一个同源的浏览器请求，或带上 x-dsh-agent-control: 1 头',
-      { status: denied },
-    )
-  }
-  if (!isJsonRequest(req?.headers)) {
-    throw new ControlError(ERROR_CODES.invalidRequest, '只接受 content-type: application/json 的请求')
-  }
+  assertTrustedJsonRequest(ctx, req, ERROR_CODES.shutdownDenied)
   const result = await requestShutdown(ctx, restart)
   // 兜底：deps 一定带 deferExit（createRestartState 会给），这里再查一次是为了绝不出现
   // 「标记成关闭中、却没人去请求退出」——那才是真的假装关掉了。
@@ -362,10 +368,14 @@ async function handleListSessions(ctx) {
  *
  * @param {any} ctx - cordis 上下文。
  * @param {any} payload - 请求体。
+ * @param {URL} _url - 未使用。
+ * @param {any} req - node IncomingMessage（要读 headers 做可信校验）。
  * @returns {Promise<{ status: number, body: any }>} 响应。
  * @throws {ControlError} 校验或删除失败时抛出，由 wrap 映射成 HTTP。
  */
-async function handleDeleteSession(ctx, payload) {
+async function handleDeleteSession(ctx, payload, _url, req) {
+  // 破坏性、不可撤销：先过与 /restart 同口径的两道闸门，再看参数。
+  assertTrustedJsonRequest(ctx, req, ERROR_CODES.requestDenied)
   const sessionId = assertSessionId(payload?.sessionId)
   const sessions = ctx.get?.('sessions')
   // 两种拼写都要查：磁盘上找目录时 `session-<id>` 与 `<id>` 都会被删。
@@ -449,10 +459,13 @@ async function archiveForHiding(ctx, sessionId, warnings) {
  *
  * @param {any} ctx - cordis 上下文。
  * @param {any} payload - 请求体。
+ * @param {URL} _url - 未使用。
+ * @param {any} req - node IncomingMessage（要读 headers 做可信校验）。
  * @returns {Promise<{ status: number, body: any }>} 响应。
  * @throws {ControlError} 校验或删除失败时抛出，由 wrap 映射成 HTTP。
  */
-async function handleDeleteTurn(ctx, payload) {
+async function handleDeleteTurn(ctx, payload, _url, req) {
+  assertTrustedJsonRequest(ctx, req, ERROR_CODES.requestDenied)
   const sessionId = assertSessionId(payload?.sessionId)
   const assistantMessageId = assertMessageId(payload?.assistantMessageId)
   const sessions = ctx.get?.('sessions')

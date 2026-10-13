@@ -7,7 +7,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 250 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 258 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）、`AGENT_BUSY`（423，agent 停不下来）
@@ -249,12 +249,12 @@ POST /api/agent-control/shutdown               # { }（可空体）→ 202 { ok 
                                                # 与 /restart 共用同一道可信校验；⚠️ 响应必须**先于**退出发出（见 3.9）
 ```
 
-失败一律 `{ ok: false, error: { code, message } }`，状态码由错误码映射（400 / 403 / 404 / 409 / 423 / 429 / 501）。**删除类的路由没有鉴权**：DSH 的插件自建路由不走 harness 的鉴权链路，谁都能访问这个端口就能调用删除。因此：
+失败一律 `{ ok: false, error: { code, message } }`，状态码由错误码映射（400 / 403 / 404 / 409 / 423 / 429 / 501）。**自建路由本身没有 harness 的鉴权**：DSH 的插件自建路由不走 harness 的鉴权链路，端口可达就能发请求。所以四个 POST 路由（`/session/delete`、`/turn/delete`、`/restart`、`/shutdown`）都过同一个 `assertTrustedJsonRequest`（`src/index.mjs`）：先可信校验、后要求 `content-type: application/json`（否则别的网页能用 `<form enctype="text/plain">` 跨站触发）。可信校验**优先用宿主的 `ctx.connection.requestRejection`，宿主服务不可用时靠自实现兜底**（见下面 `POST /restart` 那一条）；删除路由被拒的错误码是 `REQUEST_DENIED`（403，宿主给 401 时照抄 401），与 `RESTART_DENIED` / `SHUTDOWN_DENIED` 分开。`GET /sessions`、`GET /turns` 只读，不加这道校验。因此：
 
 - 请求体必须校验：字段存在、类型、id 形状（只允许 `[A-Za-z0-9._:-]`、**首字符必须是字母或数字**、去掉 `session-` 前缀后同样如此、拒绝 `..`；否则 `.` / `session-` / `session-.` 会拼出 slug 目录本身，被当成会话目录整个删掉）、长度上限、请求体上限 64 KiB
 - **不要在 UI 之外额外暴露批量删除**，除非当轮就想清楚误删的后果
 - 端口若绑到非回环地址（`webServer.config.host` 支持 `0.0.0.0`），等于把「删除我的会话」暴露给整个网络；文档与 README 里要写明
-- **`POST /restart` 是这里唯一会改变进程状态的接口，必须额外过可信校验**：优先用宿主公开的 `ctx.connection.requestRejection({ headers })`（它做的是宿主自己的 Host/Origin 校验**加浏览器鉴权**，返回 401/403 就照抄）；拿不到该服务时退回自实现——`Origin` 存在时其 host 必须等于 `Host` 头，缺失 `Origin` 时必须带自定义头 `x-dsh-agent-control: 1`。缺了这道校验，任何能打开一个网页的人都能 CSRF 掉整个实例。
+- **`POST /restart` 是这里唯一会改变进程状态的接口，可信校验（两个删除路由与 `/shutdown` 用的是同一道）**：优先用宿主公开的 `ctx.connection.requestRejection({ headers })`（它做的是宿主自己的 Host/Origin 校验**加浏览器鉴权**，返回 401/403 就照抄）；拿不到该服务时退回自实现——`Origin` 存在时其 host 必须等于 `Host` 头，缺失 `Origin` 时必须带自定义头 `x-dsh-agent-control: 1`。缺了这道校验，任何能打开一个网页的人都能 CSRF 掉整个实例。
   - ⚠️ **实测（v1.1.0）**：`requestRejection` 会把「没有浏览器凭据」的请求**直接判 401**，所以回调里的自实现路径在正常部署下**根本走不到**——这不是缺陷，是比计划更严的结果：界面上同源已登录的请求照常通过，脚本/未登录调用者拿到 401 而不是靠一个自定义头就能放行。
 - `GET /restart/status` **故意不做可信校验**：辅助进程在新进程刚起来、还没有任何凭据的时候就要靠它判断就绪。它只读、不改变任何状态，可以接受这个暴露面（能访问端口的人能读到 pid / 端口 / 阻塞会话 id / 最近一次结果）。
 
@@ -450,11 +450,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**250 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
+- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**258 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
 - ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（55）、`node test/client.test.mjs`（65）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（29），合计同样是 **250 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（63）、`node test/client.test.mjs`（65）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（29），合计同样是 **258 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
 - ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
@@ -557,7 +557,7 @@ chore: bump version to 0.2.0-rc.2-v1.0.1
 
 - **删除是不可撤销的**：会话删除会永久移除磁盘目录。任何「拿不准」的情况一律拒绝并说明，不允许「先删了再说」。
 - **不要把墓碑当成安全删除**：轮次删除只影响模型可见上下文，内容仍在日志与附件里。README、UI 文案与本文件都必须如实说明，**不得暗示内容已被彻底清除**。
-- **自建路由没有鉴权**（3.5）：请求体必须校验，不得提供未加确认的批量删除；不得把删除能力开放给 agent 工具而没有任何护栏。
+- **自建路由没有 harness 鉴权**（3.5）：会改变状态的 POST 路由都过可信校验（宿主 `requestRejection` 优先，不可用时靠同源 Origin / 自定义头兜底）并要求 JSON content-type；请求体必须校验，不得提供未加确认的批量删除；不得把删除能力开放给 agent 工具而没有任何护栏。
 - 删除目标必须在**执行前**重新解析并确认（路径真实存在、与会话 id 对得上），不要相信请求里传来的路径。
 - 不要把 token / 凭据写进代码、日志或提交，需要凭据时用 `git credential fill` 之类方式**只在内存里传递**。
 - 本文件、`README`、`docs/` 里不写本机信息（见第 5 节）：路径、profile 名、实例名、端口一律用 `<profile 名>`、`<本地 clone 路径>` 这类占位符。**仓库 owner 是例外**——它已经写在公开的仓库地址里，安装命令写真实的 `ventisyn` 才能直接复制执行。

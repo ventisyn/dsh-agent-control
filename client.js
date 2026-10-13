@@ -527,6 +527,7 @@
     'error.AGENT_BUSY': '会话正忙（任务正在运行或正在压缩上下文），这次什么都没有改动。请等它结束后再试。',
     'error.TARGET_NOT_FOUND': '目标已经不存在了。',
     'error.INVALID_REQUEST': '请求被拒绝：参数不合法。',
+    'error.REQUEST_DENIED': '这次请求没有通过可信校验，请从已登录的界面发起',
     'error.DELETE_FAILED': '宿主拒绝了这次删除',
     'error.generic': '删除失败',
     // --- 热重启（docs/PLAN-hot-restart.md M4）---------------------------------------------
@@ -656,6 +657,7 @@
     'error.AGENT_BUSY': 'The session is busy (a task is running or context is being compacted), so nothing was changed. Try again once it finishes.',
     'error.TARGET_NOT_FOUND': 'The target no longer exists.',
     'error.INVALID_REQUEST': 'The request was rejected: invalid arguments.',
+    'error.REQUEST_DENIED': 'This request did not pass the trust check; please start it from the signed-in UI',
     'error.DELETE_FAILED': 'The host refused this deletion',
     'error.generic': 'Deletion failed',
     // --- Hot restart (docs/PLAN-hot-restart.md M4) ----------------------------------------

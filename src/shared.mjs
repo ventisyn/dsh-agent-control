@@ -37,6 +37,9 @@ export const PATHS = {
  */
 export const ERROR_CODES = {
   invalidRequest: 'INVALID_REQUEST',
+  // 删除类路由没通过可信校验（宿主鉴权 / Origin 同源 / 自定义头）。与 RESTART_DENIED / SHUTDOWN_DENIED 分开：
+  // 那两个是「让进程消失」的闸门，这个是「删数据」的闸门，处置文案不同。
+  requestDenied: 'REQUEST_DENIED',
   targetNotFound: 'TARGET_NOT_FOUND',
   turnNotClosed: 'TURN_NOT_CLOSED',
   turnCompacted: 'TURN_COMPACTED',
@@ -87,6 +90,7 @@ export class ControlError extends Error {
 export function statusForCode(code) {
   switch (code) {
     case ERROR_CODES.invalidRequest: return 400
+    case ERROR_CODES.requestDenied: return 403
     case ERROR_CODES.targetNotFound: return 404
     case ERROR_CODES.turnNotClosed:
     case ERROR_CODES.turnCompacted:

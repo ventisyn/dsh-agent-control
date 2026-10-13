@@ -537,6 +537,143 @@ test('合法 id 经路由仍能删除：UUID、session-<UUID>、session-<n>，�
 })
 
 // ---------------------------------------------------------------------------
+// 删除路由的可信校验：与 /restart 同口径（先可信、后 JSON content-type），错误码是 REQUEST_DENIED
+// ---------------------------------------------------------------------------
+
+test('REQUEST_DENIED 映射到 403，且不是重启 / 关闭那两个码', () => {
+  assert.equal(ERROR_CODES.requestDenied, 'REQUEST_DENIED')
+  assert.equal(statusForCode(ERROR_CODES.requestDenied), 403)
+  assert.notEqual(ERROR_CODES.requestDenied, ERROR_CODES.restartDenied)
+  assert.notEqual(ERROR_CODES.requestDenied, ERROR_CODES.shutdownDenied)
+})
+
+/** 被拒的请求头组合：[说明, 头, 期望状态, 期望错误码]。两个删除路由共用。 */
+const DENIED_DELETE_REQUESTS = [
+  ['不带 Origin 也不带自定义头', { origin: undefined }, 403, ERROR_CODES.requestDenied],
+  ['Origin 与 Host 不一致（别的网页）', { origin: 'http://evil.example' }, 403, ERROR_CODES.requestDenied],
+  ['Origin 是 null（沙箱 iframe / file://）', { origin: 'null' }, 403, ERROR_CODES.requestDenied],
+  // 跨站 <form enctype="text/plain"> 的真实形态：别的 Origin + text/plain。可信校验在前，所以先 403。
+  ['跨站表单：别的 Origin + text/plain', { origin: 'http://evil.example', 'content-type': 'text/plain' }, 403, ERROR_CODES.requestDenied],
+  ['同源但 content-type 是 text/plain', { 'content-type': 'text/plain' }, 400, ERROR_CODES.invalidRequest],
+  ['同源但没有 content-type', { 'content-type': undefined }, 400, ERROR_CODES.invalidRequest],
+  ['自定义头可信、content-type 却是 text/plain', { origin: undefined, 'x-dsh-agent-control': '1', 'content-type': 'text/plain' }, 400, ERROR_CODES.invalidRequest],
+]
+
+test('★ POST /session/delete 被拒：缺可信凭据 403 REQUEST_DENIED、content-type 不对 400，目录一个都不少', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] } })
+  const body = JSON.stringify({ sessionId: '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721' })
+
+  for (const [label, headers, status, code] of DENIED_DELETE_REQUESTS) {
+    const response = await call(host, PATHS.sessionDelete, { body, headers })
+    assert.equal(response.status, status, label)
+    assert.equal(response.body.error.code, code, label)
+    assert.deepEqual(snapshotHomeSessions(home), seeded, `★ ${label}：被拒的请求不能删任何东西`)
+  }
+  assert.deepEqual(host.errors, [], '参数 / 可信校验失败不是内部故障')
+})
+
+test('POST /session/delete：宿主 requestRejection 的 401 / 403 照抄，仍是 REQUEST_DENIED，且不删', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const body = JSON.stringify({ sessionId: '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721' })
+
+  for (const rejection of [401, 403]) {
+    const host = makeHost({
+      sessions: { get: () => undefined, list: () => [] },
+      connection: { requestRejection: () => rejection },
+    })
+    // 头本身是同源的：拒绝只来自宿主的结论。
+    const response = await call(host, PATHS.sessionDelete, { body })
+    assert.equal(response.status, rejection)
+    assert.equal(response.body.error.code, ERROR_CODES.requestDenied)
+    assert.deepEqual(snapshotHomeSessions(home), seeded)
+  }
+})
+
+test('POST /session/delete：同源浏览器请求、或带自定义头的请求，照常 200', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] } })
+  const remaining = new Set(seeded)
+
+  for (const [sessionId, dirName, headers] of [
+    ['1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721', '1afe9c3b-fd0c-4d6f-9ecf-a1f6261ad721', {}],
+    // 没有 Origin 时靠自定义头放行（脚本 / 非浏览器调用者）。
+    ['session-7', 'session-7', { origin: undefined, 'x-dsh-agent-control': '1' }],
+  ]) {
+    const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId }), headers })
+    assert.equal(response.status, 200, sessionId)
+    remaining.delete(seeded.find((dir) => path.basename(dir) === dirName))
+    assert.deepEqual(snapshotHomeSessions(home), [...remaining].sort())
+  }
+})
+
+/** 造一个能真删一轮的 host（与「删一轮」那条用例同一套接线），并把假会话一并返回。 */
+function makeTurnDeleteHost(extraServices = {}) {
+  const { session, turns } = threeTurnSession()
+  const live = Object.assign(session, { id: 'session-t' })
+  const agent = { runMaintenance: (task) => task(new AbortController().signal) }
+  const host = makeHost({
+    sessions: { get: (id) => (id === 'session-t' ? live : undefined), list: () => [live], flush: async () => true },
+    agents: { get: (id) => (id === 'session-t' ? agent : undefined) },
+    ...extraServices,
+  })
+  return { host, live, turns }
+}
+
+test('★ POST /turn/delete 被拒：缺可信凭据 403 REQUEST_DENIED、content-type 不对 400，不写任何事件', async () => {
+  const { host, live, turns } = makeTurnDeleteHost()
+  const body = JSON.stringify({ sessionId: 't', assistantMessageId: turns[1].assistantId })
+  const before = live.snapshotEvents().length
+
+  for (const [label, headers, status, code] of DENIED_DELETE_REQUESTS) {
+    const response = await call(host, PATHS.turnDelete, { body, headers })
+    assert.equal(response.status, status, label)
+    assert.equal(response.body.error.code, code, label)
+    assert.equal(live.snapshotEvents().length, before, `★ ${label}：被拒的请求不能写删除事务`)
+  }
+  assert.deepEqual(host.errors, [])
+})
+
+test('POST /turn/delete：宿主 requestRejection 的 401 / 403 照抄，仍是 REQUEST_DENIED，且不写事件', async () => {
+  for (const rejection of [401, 403]) {
+    const { host, live, turns } = makeTurnDeleteHost({ connection: { requestRejection: () => rejection } })
+    const before = live.snapshotEvents().length
+    const response = await call(host, PATHS.turnDelete, { body: JSON.stringify({ sessionId: 't', assistantMessageId: turns[1].assistantId }) })
+    assert.equal(response.status, rejection)
+    assert.equal(response.body.error.code, ERROR_CODES.requestDenied)
+    assert.equal(live.snapshotEvents().length, before)
+  }
+})
+
+test('POST /turn/delete：同源浏览器请求、或带自定义头的请求，照常 200', async () => {
+  for (const [headers, index] of [[{}, 1], [{ origin: undefined, 'x-dsh-agent-control': '1' }, 2]]) {
+    const { host, turns } = makeTurnDeleteHost()
+    const response = await call(host, PATHS.turnDelete, {
+      body: JSON.stringify({ sessionId: 't', assistantMessageId: turns[index].assistantId }),
+      headers,
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.turn, index + 1)
+  }
+})
+
+test('/restart 与 /shutdown 的拒绝码没变：仍是 RESTART_DENIED / SHUTDOWN_DENIED（不是 REQUEST_DENIED）', async (t) => {
+  const home = workspaceHome(t)
+  resetRestartRuntimeForTest()
+  const host = makeRestartHost()
+  const restart = await call(host, PATHS.restart, { body: '{}', headers: { origin: undefined } })
+  assert.equal(restart.status, 403)
+  assert.equal(restart.body.error.code, ERROR_CODES.restartDenied)
+  const shutdown = await call(host, PATHS.shutdown, { body: '{}', headers: { origin: undefined } })
+  assert.equal(shutdown.status, 403)
+  assert.equal(shutdown.body.error.code, ERROR_CODES.shutdownDenied)
+  assert.deepEqual(host.exits, [], '被拒的关闭不能真的退出')
+})
+
+// ---------------------------------------------------------------------------
 // 热重启（M3）：状态码映射、可信校验、守卫链、状态接口、续作投递
 // ---------------------------------------------------------------------------
 
