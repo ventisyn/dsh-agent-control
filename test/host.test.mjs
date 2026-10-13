@@ -283,6 +283,32 @@ test('没打开过的会话不去动归档（它本来就不会留在内存里�
   assert.deepEqual(archived, [], '★ 不活的会话不需要借归档藏行')
 })
 
+test('归档要试两种拼写：宿主只认存储里那一种（真机就是这么被拒的）', async (t) => {
+  const home = tempHome(t)
+  makeSessionDir(home, 'abc')
+  const attempts = []
+  const live = { id: 'abc' }
+  const host = makeHost({
+    sessions: { get: () => live, list: () => [live] },
+    workspaceRegistry: {
+      list: () => [],
+      archiveSession: async (id) => {
+        attempts.push(id)
+        if (id.startsWith('session-')) {
+          throw new Error(`cannot archive session '${id}': live sessions and session persistence hold no such session`)
+        }
+      },
+    },
+  })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 200)
+  assert.equal(attempts[0], 'session-abc', '先试原样那一种')
+  assert.ok(attempts.includes('abc'), '★ 被拒之后必须退到另一种拼写再试')
+  assert.deepEqual(response.body.warnings.filter((w) => w.includes('隐藏')), [], '退一步成了就不该有降级 warning')
+})
+
 test('归档能力不可用时只降级成 warning，删除本身照样成功', async (t) => {
   const home = tempHome(t)
   makeSessionDir(home, 'abc')

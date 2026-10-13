@@ -377,18 +377,25 @@ async function handleDeleteSession(ctx, payload) {
  * @returns {Promise<boolean>} 成功标记为归档时 true（调用方据此保留这条标记）。
  */
 async function archiveForHiding(ctx, sessionId, warnings) {
-  const call = safeCall(() => ctx.get?.('workspaceRegistry')?.archiveSession?.(sessionId, { stopActivity: true }))
-  if (call === undefined || typeof call.then !== 'function') {
+  const registry = safeCall(() => ctx.get?.('workspaceRegistry'))
+  if (registry === undefined || registry === null || typeof registry.archiveSession !== 'function') {
     warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（宿主没有归档能力），它可能留到下次重启`)
     return false
   }
-  try {
-    await call
-    return true
-  } catch (error) {
-    warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（归档失败：${error instanceof Error ? error.message : String(error)}），它可能留到下次重启`)
-    return false
+  // ⚠️ **两种拼写都要试**：宿主的归档先按存储里的规范 id 找会话（`sessionKnown`：先查 store、再查头部
+  // 索引），拿不匹配的那一种去问会被直接拒绝——真机上就是这么报的：
+  // `cannot archive session '…': live sessions and session persistence hold no such session`。
+  const failures = []
+  for (const name of sessionDirNames(sessionId)) {
+    try {
+      await registry.archiveSession(name, { stopActivity: true })
+      return true
+    } catch (error) {
+      failures.push(`${name}：${error instanceof Error ? error.message : String(error)}`)
+    }
   }
+  warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（归档失败：${failures.join('；')}），它可能留到下次重启`)
+  return false
 }
 
 /**
