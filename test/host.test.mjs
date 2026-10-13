@@ -242,30 +242,53 @@ test('删掉会话后通知界面：发出 api-session/removed（否则它会掉
   assert.deepEqual(removed, ['session-abc'], '★ 必须告诉界面这个会话没了')
 })
 
-test('删掉之后把这一行从侧栏藏起来：调用 workspaceRegistry.archiveSession', async (t) => {
-  // 宿主的会话列表把「内存里还活着」的会话也算进去，而插件没有公开 API 能把内存记录摘掉；
+test('「本次启动后打开过」的会话：先归档藏行，再删（顺序反了宿主会拒绝归档）', async (t) => {
+  // 宿主的会话列表把「内存里还活着」的会话也算进去，而插件没有公开 API 能把那条记录摘掉；
   // 不藏的话，删完的会话会以「不属于任何工作区」的身份挂回侧栏（真机实测掉进「未分组」）。
+  // ⚠️ 顺序也实测过：删完再归档会被宿主拒绝——`live sessions and session persistence hold no such session`。
+  const home = tempHome(t)
+  const dir = makeSessionDir(home, 'session-abc')
+  const archived = []
+  const live = { id: 'session-abc' }
+  const host = makeHost({
+    sessions: { get: () => live, list: () => [live] },
+    workspaceRegistry: {
+      list: () => [],
+      archiveSession: async (id, options) => archived.push({ id, options, existed: existsSync(dir) }),
+    },
+  })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 200)
+  assert.equal(archived.length, 1, '★ 活会话删完必须有这一藏')
+  assert.equal(archived[0].id, 'session-abc')
+  assert.equal(archived[0].existed, true, '★ 必须在删磁盘**之前**归档，否则宿主会拒绝')
+  assert.deepEqual(response.body.warnings.filter((w) => w.includes('隐藏')), [], '藏成功就不该有降级 warning')
+  assert.equal(existsSync(dir), false, '删完目录还是要没')
+})
+
+test('没打开过的会话不去动归档（它本来就不会留在内存里）', async (t) => {
   const home = tempHome(t)
   makeSessionDir(home, 'abc')
   const archived = []
   const host = makeHost({
     sessions: { get: () => undefined, list: () => [] },
-    workspaceRegistry: { list: () => [], archiveSession: async (id, options) => archived.push([id, options]) },
+    workspaceRegistry: { list: () => [], archiveSession: async (id) => archived.push(id) },
   })
 
   const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'abc' }) })
 
   assert.equal(response.status, 200)
-  assert.equal(archived.length, 1, '★ 删除后必须把这一行藏起来')
-  assert.equal(archived[0][0], 'abc')
-  assert.deepEqual(response.body.warnings.filter((w) => w.includes('隐藏')), [], '藏成功就不该有降级 warning')
+  assert.deepEqual(archived, [], '★ 不活的会话不需要借归档藏行')
 })
 
 test('归档能力不可用时只降级成 warning，删除本身照样成功', async (t) => {
   const home = tempHome(t)
   makeSessionDir(home, 'abc')
+  const live = { id: 'abc' }
   const host = makeHost({
-    sessions: { get: () => undefined, list: () => [] },
+    sessions: { get: () => live, list: () => [live] },
     workspaceRegistry: { list: () => [], archiveSession: async () => { throw new Error('宿主拒绝了归档') } },
   })
 

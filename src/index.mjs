@@ -326,6 +326,12 @@ async function handleDeleteSession(ctx, payload) {
   // v1.2.0 起这个判断**不再用来拒绝活会话**（删除对活会话同样执行，先停 agent 再删目录），
   // 只用来在结果里如实标注 `wasLive` / `liveDescendants`；所以传判断函数而不是一个布尔。
   const isLive = (id) => findLiveSession(sessions, id) !== undefined
+  const warnings = []
+  // 目标「本次启动后打开过」时，宿主的会话列表会一直列着它（内存里那条记录插件摘不掉），删完之后它会以
+  // 「不属于任何工作区」的身份挂回侧栏。公开的 `archiveSession` 是宿主自己的「从列表里藏起来」能力，
+  // 先借它把那行藏起来——**顺序必须是「先归档、再删」**：真机实测删完再归档会被宿主拒绝，
+  // 报 `live sessions and session persistence hold no such session`（那时会话已经不存在了）。
+  const hidden = isLive(sessionId) ? await archiveForHiding(ctx, sessionId, warnings) : false
   const result = await deleteSession({
     sessionsRoot: sessionsRoot(),
     agents: ctx.get?.('agents'),
@@ -333,8 +339,9 @@ async function handleDeleteSession(ctx, payload) {
     workspaceRegistry: ctx.get?.('workspaceRegistry'),
     projectionCache: projectionCacheTable(ctx),
     stopTimeoutMs: DEFAULT_STOP_TIMEOUT_MS,
+    keepArchived: hidden,
   }, sessionId)
-  const warnings = [...result.warnings, ...result.workspace.warnings]
+  warnings.push(...result.warnings, ...result.workspace.warnings)
   if (!result.workspace.available) {
     warnings.push('这个部署没有工作区注册表，工作区记账那一段没有执行')
   }
@@ -351,23 +358,37 @@ async function handleDeleteSession(ctx, payload) {
     })
     if (sent !== true) warnings.push(`没能通知界面「${id} 已删除」（宿主没有 emit 能力），侧栏可能要刷新之后才会少掉它`)
   }
-  // 让这一行从侧栏真正消失。宿主的会话列表把「内存里还活着」的会话也算进去，而插件没有公开 API
-  // 能把那条记录摘掉——删完之后它会以「不属于任何工作区」的身份挂回侧栏（真机实测：掉进「未分组」）。
-  // 公开的 `archiveSession` 正是宿主的「从列表里藏起来」能力（归档行默认不显示，且会立刻推给界面），
-  // 先借它补上「内存记录消失之前」这段窗口。**这不是用归档代替删除**：磁盘、工作区记账、投影缓存
-  // 都已经真的删掉了；重启之后那条内存记录不复存在，这条归档标记会变成一条指向已删会话的孤儿
-  // （无害：宿主的列表里已经没有它了）。失败只降级成 warning，绝不影响删除本身。
-  const archive = safeCall(() => ctx.get?.('workspaceRegistry')?.archiveSession?.(result.sessionId, { stopActivity: true }))
-  if (archive === undefined || typeof archive.then !== 'function') {
-    warnings.push(`没能把 ${result.sessionId} 从侧栏隐藏起来（宿主没有归档能力），它可能留到下次重启`);
-  } else {
-    try {
-      await archive
-    } catch (error) {
-      warnings.push(`没能把 ${result.sessionId} 从侧栏隐藏起来（归档失败：${error instanceof Error ? error.message : String(error)}），它可能留到下次重启`)
-    }
-  }
   return { status: 200, body: { ok: true, ...result, warnings } }
+}
+
+/**
+ * 把一个「本次启动后打开过」的会话从侧栏藏起来（删除路由在动手**之前**调它）。
+ *
+ * 宿主的会话列表把「内存里还活着」的会话也算进去，而插件没有公开 API 能把那条记录摘掉——删完之后它会以
+ * 「不属于任何工作区」的身份挂回侧栏（真机实测：掉进「未分组」，而且下一次列表拉取就回来）。公开的
+ * `archiveSession` 正是宿主自己的「从列表里藏起来」能力（归档行默认不显示，状态会立刻推给界面）。
+ *
+ * **这不是用归档代替删除**：磁盘、工作区记账、投影缓存随后都会真的删掉；重启之后那条内存记录不复存在，
+ * 这条归档标记只剩一条指向已删会话的孤儿（宿主的列表里已经没有它）。失败只降级成 warning。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {string} sessionId - 目标会话。
+ * @param {string[]} warnings - 收集降级说明。
+ * @returns {Promise<boolean>} 成功标记为归档时 true（调用方据此保留这条标记）。
+ */
+async function archiveForHiding(ctx, sessionId, warnings) {
+  const call = safeCall(() => ctx.get?.('workspaceRegistry')?.archiveSession?.(sessionId, { stopActivity: true }))
+  if (call === undefined || typeof call.then !== 'function') {
+    warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（宿主没有归档能力），它可能留到下次重启`)
+    return false
+  }
+  try {
+    await call
+    return true
+  } catch (error) {
+    warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（归档失败：${error instanceof Error ? error.message : String(error)}），它可能留到下次重启`)
+    return false
+  }
 }
 
 /**

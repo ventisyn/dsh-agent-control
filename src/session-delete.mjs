@@ -123,7 +123,7 @@ export async function stopAgentIfRunning(agents, sessionId, timeoutMs = DEFAULT_
  * @param {string} sessionId - 会话 id。
  * @returns {Promise<{ available: boolean, detached: boolean, unarchived: boolean, unpinned: boolean, failures: string[], warnings: string[] }>} 逐项结果。
  */
-export async function detachFromWorkspaces(registry, sessionId) {
+export async function detachFromWorkspaces(registry, sessionId, options = {}) {
   const result = {
     available: false,
     detached: false,
@@ -149,13 +149,17 @@ export async function detachFromWorkspaces(registry, sessionId) {
       }
     }
   }
-  for (const name of names) {
-    if (registry.archivedSessionIds?.includes(name) !== true) continue
-    try {
-      await registry.unarchiveSession(name)
-      result.unarchived = true
-    } catch (error) {
-      result.failures.push(`归档集合未清理：${messageOf(error)}`)
+  // 归档集合照常清理，**除非调用方要求保留**：删一个「本次启动后打开过」的会话时，我们正是靠那条
+  // 归档标记把内存里那条摘不掉的记录从侧栏藏起来（见 index.mjs 的删除路由），清理掉它幽灵就又出现了。
+  if (options.keepArchived !== true) {
+    for (const name of names) {
+      if (registry.archivedSessionIds?.includes(name) !== true) continue
+      try {
+        await registry.unarchiveSession(name)
+        result.unarchived = true
+      } catch (error) {
+        result.failures.push(`归档集合未清理：${messageOf(error)}`)
+      }
     }
   }
   for (const name of names) {
@@ -209,6 +213,7 @@ export async function detachFromWorkspaces(registry, sessionId) {
  * @param {{ delete(key: string): Promise<boolean> }} [deps.projectionCache] - 投影缓存域的 `sessions` 表。
  * @param {number} [deps.stopTimeoutMs] - 停 agent 的等待上限。
  * @param {(ms: number) => Promise<void>} [deps.sleep] - 复检投影缓存时的等待实现（测试注入，避免真等）。
+ * @param {boolean} [deps.keepArchived] - 保留归档标记（目标当时还活着时用：靠它把侧栏那行藏起来）。
  * @returns {Promise<object>} 逐段结果：`dirs` / `removed`（含后代）、`descendants`、`detached`（等于 `workspace.detached`）、
  *   `stopped`、`wasLive`（目标当时是否活在本进程里）、`liveDescendants`、`workspace`、`projectionCache`、`warnings`。
  * @throws {ControlError} agent 停不下来、目标不存在、或目录删不净时抛出。
@@ -264,7 +269,9 @@ export async function deleteSession(deps, sessionId) {
     throw new ControlError(ERROR_CODES.targetNotFound, `找不到会话 ${sessionId}`)
   }
 
-  const workspace = await detachFromWorkspaces(workspaceRegistry, sessionId)
+  // `keepArchived` 由调用方决定：目标当时还活着（内存里有记录、列表里还会出现）时保留归档标记，
+  // 否则照常清干净。@see detachFromWorkspaces
+  const workspace = await detachFromWorkspaces(workspaceRegistry, sessionId, { keepArchived: deps.keepArchived === true })
   for (const id of lineage.descendants) {
     // 子代理通常不在任何工作区里，没找到是常态，不进 warning；真正的失败照报。
     const child = await detachFromWorkspaces(workspaceRegistry, id)
