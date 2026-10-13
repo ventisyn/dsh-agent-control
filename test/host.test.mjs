@@ -885,6 +885,34 @@ test('★ 回滚里 unarchiveSession 同步抛错（不是返回 rejected promis
 })
 
 // ---------------------------------------------------------------------------
+// 取消重启后的现场：spec.json（含环境变量）不能留在盘上
+// ---------------------------------------------------------------------------
+
+test('★ 重启在写完 spec.json 之后被取消（派生辅助进程抛错）：spec.json 被删掉，不把环境变量留在盘上', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const dir = restartDir(home)
+  const background = []
+  const { ctx, errors } = makeToolContext()
+  const deps = makeRestartDeps(ctx, {
+    dshHome: home,
+    schedule: (fn) => { background.push(fn) },
+    spawn: () => { throw new Error('EPERM: 派生辅助进程被拒') },
+    appExit: () => { throw new Error('不该走到退出') },
+  })
+
+  await requestRestart(ctx, deps, { source: 'ui', reason: '测试取消现场', force: true })
+  await background.shift()()
+
+  const last = readLast(dir)
+  assert.equal(last.stage, 'cancelled', '这次重启被取消了')
+  assert.match(last.error, /EPERM/)
+  assert.equal(existsSync(path.join(dir, 'spec.json')), false, '★ spec.json 里有完整的环境变量快照，取消后必须删掉（否则要等下一次新进程启动才会被清）')
+  assert.equal(readPending(dir), undefined)
+  assert.deepEqual(errors.filter((message) => !message.includes('EPERM')), [])
+})
+
+// ---------------------------------------------------------------------------
 // 幽灵会话经路由：200 + ghost: true，并通知界面
 // ---------------------------------------------------------------------------
 

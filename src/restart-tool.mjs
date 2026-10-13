@@ -920,6 +920,9 @@ async function safeCancel(ctx, deps, state, reason) {
 async function cancelRestart(ctx, deps, state, reason) {
   if (runtime.inFlight === state) runtime.inFlight = null
   safeCall(() => clearPending(deps.dir))
+  // 启动规格里有完整的环境变量快照，约定「用完即删」且由**新进程**负责删——可这次取消了，不会有新进程，
+  // 它会一直留在盘上（直到某次未来的启动做过期清理）。取消时自己删：单飞锁保证此刻没有别的重启在用它。
+  safeCall(() => removeFile(path.join(deps.dir, SPEC_FILE)))
   const now = deps.now()
   const patch = {
     restartId: state.restartId,
