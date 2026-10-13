@@ -137,6 +137,52 @@ export function apply(ctx, config, host) {
   registerRestartTool(ctx, restart)
   // 新进程这一侧：应用就绪后消费上一次重启留下的待办，投递续作消息；顺带清掉含 env 的启动规格。
   startResumeDelivery(ctx, restart)
+  // 启动清理：删会话时留下的那条归档标记（用来把侧栏那行藏起来的）在实例重启后就成了一条孤儿——
+  // 会话本身已经不在了。删标记是幂等的，服务还没就绪就先跳过、等服务出现再补一次。
+  void pruneOrphanArchives(ctx).catch(() => {})
+  ctx.inject?.(['workspaceRegistry'], () => { void pruneOrphanArchives(ctx).catch(() => {}) })
+}
+
+/**
+ * 清掉指向「已经不存在的会话」的归档标记，返回清掉的条数。
+ *
+ * 为什么会有这种孤儿：删除路由会把「本次启动后打开过」的目标先归档（`archiveForHiding`），借宿主的
+ * 「从列表里藏起来」把内存里那条摘不掉的记录从侧栏压住。实例一重启，那条内存记录不复存在，标记就只剩
+ * 一个指向已删会话的 id——留它没用，还让工作区记账里多一条查不到的记录，于是在启动时收干净。
+ *
+ * 判据刻意保守：**只有活着的、或磁盘上确实还有目录的**才算存在；拿不准就不动（宁留标记，不误删记账）。
+ * 单个 id 清理失败只记日志，绝不影响插件加载。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @returns {Promise<number>} 清掉的标记条数。
+ */
+export async function pruneOrphanArchives(ctx) {
+  const registry = safeCall(() => ctx.get?.('workspaceRegistry'))
+  const archived = registry?.archivedSessionIds
+  if (!Array.isArray(archived) || archived.length === 0) return 0
+  const live = safeCall(() => ctx.get?.('sessions')?.list()) ?? []
+  const rows = safeCall(() => listSessions({
+    sessionsRoot: sessionsRoot(),
+    workspaceRegistry: registry,
+    liveSessionIds: [...live].map((session) => session?.id).filter((id) => typeof id === 'string'),
+  })) ?? []
+  const known = new Set(rows.flatMap((row) => sessionDirNames(row?.sessionId ?? '')))
+  // 内存里活着的也算「存在」：`listSessions` 把「活的 + 记账里的」并成一行，光活着、记账里没有的会话
+  // 不一定出现在结果里——而那正是本功能最常见的形态（删的就是刚打开过的那个）。
+  for (const session of live) {
+    if (typeof session?.id === 'string') for (const name of sessionDirNames(session.id)) known.add(name)
+  }
+  let pruned = 0
+  for (const id of archived) {
+    if (sessionDirNames(id).some((name) => known.has(name))) continue
+    try {
+      await registry.unarchiveSession(id)
+      pruned += 1
+    } catch (error) {
+      ctx.logger?.warn?.(`${PLUGIN_NAME}: 清理归档标记失败（${id}）：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return pruned
 }
 
 /**

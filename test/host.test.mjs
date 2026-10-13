@@ -31,7 +31,7 @@ import {
 } from '../src/restart-tool.mjs'
 import { threeTurnSession } from './fake-session.mjs'
 
-const { apply } = await import('../src/index.mjs')
+const { apply, pruneOrphanArchives } = await import('../src/index.mjs')
 
 /** 造一个临时 DSH_HOME，并在测试结束后还原环境变量。 */
 function tempHome(t) {
@@ -281,6 +281,47 @@ test('没打开过的会话不去动归档（它本来就不会留在内存里�
 
   assert.equal(response.status, 200)
   assert.deepEqual(archived, [], '★ 不活的会话不需要借归档藏行')
+})
+
+test('启动清理：只清掉指向已不存在会话的归档标记', async (t) => {
+  // 删会话时会把目标先归档（借宿主的「从列表里藏起来」压住内存里那条记录）；实例一重启，
+  // 那条记录不复存在，标记就成了孤儿。判据保守：活着、或磁盘上还有目录的，一律不动。
+  const home = tempHome(t)
+  makeSessionDir(home, 'ondisk')
+  const unarchived = []
+  const live = { id: 'live-one' }
+  const ctx = {
+    get: (name) => (name === 'workspaceRegistry'
+      ? { archivedSessionIds: ['gone-one', 'ondisk', 'live-one'], list: () => [], unarchiveSession: async (id) => unarchived.push(id) }
+      : name === 'sessions' ? { list: () => [live] } : undefined),
+    logger: { warn: () => {} },
+  }
+
+  const pruned = await pruneOrphanArchives(ctx)
+
+  assert.equal(pruned, 1, '★ 只清真正没了的那一条')
+  assert.deepEqual(unarchived, ['gone-one'])
+})
+
+test('归档集合为空时启动清理什么都不做（也不报错）', async (t) => {
+  const home = tempHome(t)
+  const ctx = { get: () => ({ archivedSessionIds: [], list: () => [] }), logger: { warn: () => {} } }
+
+  assert.equal(await pruneOrphanArchives(ctx), 0)
+  assert.equal(await pruneOrphanArchives({ get: () => undefined, logger: { warn: () => {} } }), 0, '没有注册表也要安静地跳过')
+})
+
+test('apply 会顺手跑一次启动清理', async (t) => {
+  const home = tempHome(t)
+  const unarchived = []
+  makeHost({
+    sessions: { get: () => undefined, list: () => [] },
+    workspaceRegistry: { archivedSessionIds: ['gone'], list: () => [], unarchiveSession: async (id) => unarchived.push(id) },
+  })
+
+  for (let i = 0; i < 40 && unarchived.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+
+  assert.deepEqual(unarchived, ['gone'], '★ 启动时就该把孤儿标记收干净')
 })
 
 test('归档要试两种拼写：宿主只认存储里那一种（真机就是这么被拒的）', async (t) => {

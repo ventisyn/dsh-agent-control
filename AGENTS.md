@@ -7,7 +7,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 237 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 240 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）、`AGENT_BUSY`（423，agent 停不下来）
@@ -102,9 +102,27 @@
         → 删磁盘目录（目标 + 后代）→ 再删一次（防 dispose 路径重建）→ 确认删净
         → 才清工作区记账（两种拼写都认，用记账里那一种去解除）
         → 清投影缓存（`ctx.storageDomain.get('session_projcache').table('sessions').delete`，两种拼写）
-        → 通知界面：发宿主的公开事件 `api-session/removed`（目标 + 每个后代）——内存里那条记录摘不掉，
-          侧栏会把「不属于任何工作区」的会话摆进「未分组」，不发这个事件它就在那儿挂着（真机实测）
+        → 通知界面：发宿主的公开事件 `api-session/removed`（目标 + 每个后代）
+
+目标「本次启动后打开过」（内存 store 里有记录）时，删除**之前**还要先做一件事——见下面「让那一行真的消失」。
 ```
+
+#### 让那一行真的消失：借归档当「临时遮盖」，启动时再收掉
+
+删一个「本次启动后打开过」的会话时，宿主的**会话列表仍然会列出它**：`ApiSessionList.list()` 把 `ctx.sessions` 里活着的
+会话也算进去，而插件没有任何公开 API 能把那条内存记录摘掉（`detachEntered` 是 private、`AgentHandle.dispose()` 只交给创建者）。
+删完之后它不属于任何工作区，于是被侧栏摆进「未分组」——真机实测：删完那一行还在，下一次列表拉取还会把它带回来
+（只发 `api-session/removed` 只能让它闪一下）。
+
+所以删除**之前**先调宿主的公开能力 `workspaceRegistry.archiveSession(id, { stopActivity: true })`：归档正是宿主
+「从列表里藏起来」的公开能力（归档行默认不显示，状态会立刻推给界面），用它压住这段窗口。**这不是用归档代替删除**：
+磁盘、记账、缓存随后都真的删掉，只刻意保留这一条标记（`keepArchived`，否则删除流程会顺手把它解除、幽灵又被放回来）。
+
+- ⚠️ **顺序不能反**：删完再归档会被宿主拒绝——`live sessions and session persistence hold no such session`。
+- ⚠️ **两种拼写都要试**：宿主按存储里的规范 id 找会话（`sessionKnown`：先查 store、再查头部索引），另一种拼写一定被拒。
+- 只有**活目标**才归档；归档失败只降级成一条 warning，绝不影响删除结果。
+- 实例重启后那条内存记录不复存在，标记成了孤儿——`pruneOrphanArchives()` 在启动时清掉它，判据保守：
+  **活着、或磁盘上确实还有目录的一律不动**（宁留标记，不误删记账）。
 
 **「不留残留」的范围（0.2.0-rc.2 实测，用一个真实会话 id 全盘 grep 得出）**：会话目录、`storages/workspace.json` 里的记账、`storages/session_projcache/sessions/<id>.json`、以及子代理会话（`origin: 'subagent'` 的独立会话，实测 59 个会话里有 25 个是子代理；父会话头里写 `session-<uuid>`，子代理目录是裸 uuid）。**刻意不碰**：别的插件自己的数据（如审批插件的 `auto-approve/events.jsonl` 里有 sessionId 字段——那是它的审计记录，不归我们删）、内容寻址的共享附件、别的会话日志/缓存里**提到**这个 id 的文本（例如子代理的提示词里写着父会话 id）。投影缓存**必须走域的表接口删**，不能直接删 json 文件：域在内存里持有一份，直接删文件会在下次写入时被写回来。
 
@@ -432,11 +450,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**237 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
+- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**240 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
 - ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（49）、`node test/client.test.mjs`（63）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（24），合计同样是 **237 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（52）、`node test/client.test.mjs`（63）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（24），合计同样是 **240 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
 - ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
