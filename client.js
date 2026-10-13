@@ -1916,6 +1916,15 @@ let clientCtx
         let deleted = false
         /** 已经播过淡出的行，不再重复播放。 */
         let animated = false
+        /**
+         * 读取序号：每发起一次读取（挂载时的首次读取、每次广播触发的重读）就加一，
+         * 只有**最近发起**的那一次的结果才允许落到状态上。
+         *
+         * ⚠️ 不这样做的话，请求返回的顺序一旦与发起的顺序颠倒，较早发起、较晚到达的旧快照
+         * 会把 `deleted` 拨回「没删」，刚藏好的行随即被恢复（连着删两轮、或进会话时的首次读取
+         * 还没回来就删了一轮时都会发生）。
+         */
+        let latestLoad = 0
 
         /**
          * 按最新结果同步一次。
@@ -1961,8 +1970,10 @@ let clientCtx
 
         const resync = async () => {
           if (cancelled) return
+          latestLoad += 1
+          const load = latestLoad
           const turns = await loadDeletedTurns(sessionId)
-          if (cancelled || ref.current === null) return
+          if (cancelled || load !== latestLoad || ref.current === null) return
           const nextDeleted = turns.includes(turn)
           // 只有「本来没删、现在删了」才播动画。
           const shouldAnimate = nextDeleted && !deleted && !animated
@@ -1971,8 +1982,10 @@ let clientCtx
         }
 
         const conceal = async () => {
+          latestLoad += 1
+          const load = latestLoad
           const turns = await loadDeletedTurns(sessionId)
-          if (cancelled || ref.current === null) return
+          if (cancelled || load !== latestLoad || ref.current === null) return
           deleted = turns.includes(turn)
           if (!deleted) return
           // 页面加载时就已经是删除状态：直接隐藏，不播动画（否则每次进会话都在动）。

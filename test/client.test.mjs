@@ -1185,6 +1185,75 @@ test('读已删轮次失败时不缓存失败结果，下一次还会重试', as
   assert.equal(second.row.hidden, true, '重试成功后应当隐藏')
 })
 
+/** 造一个由测试手动放行的响应：用来摆出「先发后到」的乱序。 */
+function deferredResponse() {
+  let release
+  const promise = new Promise((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+
+test('旧的 GET /turns 响应迟到时不能覆盖新结果（先后两次广播，返回顺序颠倒）', async (t) => {
+  // 连着两次删除 → 两次广播 → 两个在飞的请求。较新的那个先回来（已删）、较旧的后到（还没删）时，
+  // 后到的旧快照不能把刚藏好的行又露出来。
+  const slots = []
+  let calls = 0
+  const browser = captureBrowser(t, () => {
+    calls += 1
+    if (calls === 1) return okTurns([])
+    const slot = deferredResponse()
+    slots.push(slot)
+    return slot.promise
+  })
+  const { row, anchor } = makeRefNode()
+  const onTurnsChanged = await mountMarker(browser.listeners, anchor, 'session-race-a')
+  assert.equal(row.hidden, false)
+
+  onTurnsChanged({ detail: { sessionId: 'session-race-a' } })
+  await flush()
+  onTurnsChanged({ detail: { sessionId: 'session-race-a' } })
+  await flush()
+  assert.equal(slots.length, 2, '两次广播应当各发一次请求')
+
+  slots[1].release(okTurns([7]))
+  await flush()
+  assert.equal(row.hidden, true, '新响应说已删，应当隐藏')
+
+  slots[0].release(okTurns([]))
+  await flush()
+  assert.equal(row.hidden, true, '★ 迟到的旧响应不能把已经藏好的行又露出来')
+})
+
+test('挂载时那次读取迟到，不能覆盖之后广播带来的新结果', async (t) => {
+  // 进会话时的首次读取（conceal）还没回来，用户就删了一轮 → 广播触发的读取先回来并隐藏；
+  // 首次读取随后才到，它是删除之前的快照，不能把状态拨回「没删」。
+  const slots = []
+  const browser = captureBrowser(t, () => {
+    const slot = deferredResponse()
+    slots.push(slot)
+    return slot.promise
+  })
+  const { scope, row, anchor } = makeRefNode()
+  const onTurnsChanged = await mountMarker(browser.listeners, anchor, 'session-race-b')
+  assert.equal(slots.length, 1, '挂载时发出首次读取，且还没回来')
+
+  onTurnsChanged({ detail: { sessionId: 'session-race-b' } })
+  await flush()
+  assert.equal(slots.length, 2)
+  slots[1].release(okTurns([7]))
+  await flush()
+  assert.equal(row.hidden, true)
+  assert.equal(browser.observers.length, 1, '已删就要盯着列表')
+
+  slots[0].release(okTurns([]))
+  await flush()
+  // 宿主重新渲染 → 观察器触发同步：状态若被旧快照拨回「没删」，这里会把整轮恢复可见。
+  scope.append(makeElement('div', { 'data-chat-turn': '7', 'data-chat-flow-kind': 'user' }))
+  browser.observers[0].callback()
+  assert.equal(row.hidden, true, '★ 首次读取迟到后，已删的轮次仍然隐藏')
+})
+
 // ---------------------------------------------------------------------------
 // 发布前的两条待验证项：就地刷新 vs 整页重载、DELETE_FAILED 的界面文案
 // ---------------------------------------------------------------------------
