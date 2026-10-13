@@ -10,7 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { zstdCompressSync } from 'node:zlib'
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 
 import { ERROR_CODES, assertSessionId, sessionDirNames } from '../src/shared.mjs'
 import {
@@ -586,4 +586,111 @@ test('合法 id 仍能正常删除：UUID、session-<UUID>、session-<n>，且�
     assert.deepEqual(snapshotSessionDirs(sessions), [...remaining].sort(), `删 ${id} 只能少它自己`)
   }
   assert.deepEqual(snapshotSessionDirs(sessions), [seeded.find((dir) => path.basename(dir) === 'aa11bb22-0000-0000-0000-000000000099')])
+})
+
+// ---------------------------------------------------------------------------
+// 回归：第一帧的压缩内容里偶然出现 zstd 魔数时，会话头不能被切短而读不出来
+// ---------------------------------------------------------------------------
+
+/** zstd 帧魔数。 */
+const ZSTD_MAGIC_BYTES = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+
+/**
+ * 手工拼一个只含一个 Raw 块的 zstd 帧：内容原样放在帧里，所以内容里的字节**一定**原样出现在压缩数据中。
+ *
+ * 靠 `zstdCompressSync` 让假魔数「碰巧」留在压缩流里不可靠（压缩器会换成 Huffman / 匹配编码），
+ * 夹具必须是确定的。帧格式：魔数 | 帧头描述符 0x20（Single_Segment、1 字节内容大小）| 内容大小 |
+ * 块头（3 字节小端：大小<<3 | 类型 Raw<<1 | 最后一块）| 原始内容。
+ */
+function rawZstdFrame(content) {
+  assert.ok(content.length < 256, 'Raw 帧夹具只支持 1 字节内容大小')
+  const blockHeader = (content.length << 3) | 1
+  return Buffer.concat([
+    ZSTD_MAGIC_BYTES,
+    Buffer.from([0x20, content.length]),
+    Buffer.from([blockHeader & 0xff, (blockHeader >> 8) & 0xff, (blockHeader >> 16) & 0xff]),
+    content,
+  ])
+}
+
+/** 一个字符串字段里**确实**带着魔数四字节的会话头帧（假魔数落在第一帧内部）。 */
+function headerFrameWithFakeMagic(header, copies = 1) {
+  const [before, after] = JSON.stringify({ type: 'session', version: 4, createdAt: 1, ...header, pad: '@@PAD@@' }).split('@@PAD@@')
+  const pads = []
+  for (let i = 0; i < copies; i += 1) pads.push(ZSTD_MAGIC_BYTES, Buffer.from(`-gap-${i}-`))
+  // 字符串里塞原始字节：解压后 toString('utf8') 会把它们变成替换字符，JSON 仍然合法。
+  const frame = rawZstdFrame(Buffer.concat([Buffer.from(before), ...pads, Buffer.from(`${after}\n`)]))
+  // 夹具自检：这确实是一个能被 zstd 正常解开的帧。
+  assert.ok(zstdDecompressSync(frame).toString('utf8').includes(`"id":"${header.id}"`))
+  return frame
+}
+
+/** 在仓库工作区里写一个会话目录：给定的若干帧原样拼成日志文件。 */
+function writeFramedSession(sessions, dirName, frames) {
+  const dir = path.join(sessions, '--D-work--', dirName)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), Buffer.concat(frames))
+  return dir
+}
+
+const BODY_FRAME = () => zstdCompressSync(Buffer.from(JSON.stringify({ type: 'turn/start', seq: 0, data: { turn: 1 } }) + '\n'))
+
+test('★ 第一帧压缩内容里含假魔数：会话头照样读得出来（不能被切短成 undefined）', (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const first = headerFrameWithFakeMagic({ id: 'c-magic', origin: 'subagent', parentSession: 'session-p-magic' })
+  // 夹具前提：假魔数确实落在第一帧**内部**（不是第二帧的真魔数）。
+  const fake = first.indexOf(ZSTD_MAGIC_BYTES, 4)
+  assert.ok(fake > 4 && fake < first.length, `夹具里必须真的出现假魔数位置（实际 ${fake}，第一帧长 ${first.length}）`)
+  const dir = writeFramedSession(sessions, 'c-magic', [first, BODY_FRAME()])
+
+  const header = readSessionHeader(dir)
+
+  assert.equal(header?.id, 'c-magic', '★ 旧实现在假魔数处切断第一帧，解压后的残缺 JSON 解析失败，于是返回 undefined')
+  assert.equal(header.origin, 'subagent')
+  assert.equal(header.parentSession, 'session-p-magic')
+})
+
+test('第一帧里有两处假魔数也能读（逐个候选位置往后试）', (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const first = headerFrameWithFakeMagic({ id: 'c-two', origin: 'subagent', parentSession: 'session-p-two' }, 2)
+  const positions = []
+  for (let at = first.indexOf(ZSTD_MAGIC_BYTES, 4); at !== -1; at = first.indexOf(ZSTD_MAGIC_BYTES, at + 1)) positions.push(at)
+  assert.ok(positions.length >= 2, `夹具里要有至少两处假魔数（实际 ${positions}）`)
+  const dir = writeFramedSession(sessions, 'c-two', [first, BODY_FRAME()])
+
+  assert.equal(readSessionHeader(dir)?.id, 'c-two')
+})
+
+test('★ 第一帧带假魔数的子代理仍被认作后代，不再只留一条「读不出会话头」', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const parent = writeFramedSession(sessions, 'session-p-magic', [zstdCompressSync(Buffer.from(JSON.stringify({ type: 'session', version: 4, id: 'session-p-magic' }) + '\n')), BODY_FRAME()])
+  const child = writeFramedSession(sessions, 'c-magic', [headerFrameWithFakeMagic({ id: 'c-magic', origin: 'subagent', parentSession: 'session-p-magic' }), BODY_FRAME()])
+
+  const lineage = findSubagentDescendants(sessions, 'session-p-magic')
+  assert.deepEqual(lineage.descendants, ['c-magic'])
+  assert.deepEqual(lineage.warnings, [], '读得出来就不该有「读不出会话头」的 warning')
+
+  const result = await deleteSession({ sessionsRoot: sessions }, 'session-p-magic')
+  assert.equal(existsSync(parent), false)
+  assert.equal(existsSync(child), false, '★ 子代理会话必须跟着删，不能成孤儿')
+  assert.deepEqual(result.descendants, ['c-magic'])
+})
+
+test('坏文件 / 非 zstd / 只有魔数 / 截断的帧：返回 undefined，不抛', (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const good = zstdCompressSync(Buffer.from(JSON.stringify({ type: 'session', id: 'x' }) + '\n'))
+  const cases = {
+    'not-zstd': [Buffer.from('plain text, definitely not zstd')],
+    'only-magic': [ZSTD_MAGIC_BYTES],
+    'magic-garbage': [ZSTD_MAGIC_BYTES, Buffer.from('garbage garbage garbage')],
+    'truncated': [good.subarray(0, Math.floor(good.length / 2))],
+    'empty': [Buffer.alloc(0)],
+    'not-json': [zstdCompressSync(Buffer.from('this is not json\n'))],
+    'json-scalar': [zstdCompressSync(Buffer.from('42\n'))],
+  }
+  for (const [name, frames] of Object.entries(cases)) {
+    const dir = writeFramedSession(sessions, name, frames)
+    assert.doesNotThrow(() => readSessionHeader(dir), name)
+    assert.equal(readSessionHeader(dir), undefined, name)
+  }
 })

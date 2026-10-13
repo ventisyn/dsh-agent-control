@@ -369,14 +369,35 @@ export function readSessionHeader(dir) {
     const length = readSync(fd, chunk, 0, chunk.length, 0)
     const head = chunk.subarray(0, length)
     if (head.length < 4 || head.compare(ZSTD_MAGIC, 0, 4, 0, 4) !== 0) return undefined
-    const next = head.indexOf(ZSTD_MAGIC, 4)
-    const text = zlib.zstdDecompressSync(next === -1 ? head : head.subarray(0, next)).toString('utf8')
-    const header = JSON.parse(text.split('\n')[0])
-    return header !== null && typeof header === 'object' ? header : undefined
+    // 第一帧在哪里结束，光靠找下一个魔数是不可靠的：压缩数据里偶然出现同样的四个字节，
+    // 就会把第一帧切短、解出残缺的 JSON。所以对每个魔数出现位置**依次**试（从最近的开始往后），
+    // 解压成功且第一行能解析成对象才采用；全部失败再用整个读到的片段试一次。
+    // （`zstdDecompressSync` 只解第一帧，后面拼接的帧不影响结果。）
+    for (let end = head.indexOf(ZSTD_MAGIC, 4); end !== -1; end = head.indexOf(ZSTD_MAGIC, end + 1)) {
+      const header = parseHeaderFrame(head.subarray(0, end))
+      if (header !== undefined) return header
+    }
+    return parseHeaderFrame(head)
   } catch {
     return undefined
   } finally {
     if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/**
+ * 解一帧 zstd 并把第一行当 JSON 对象读出来；任何一步不成立都返回 undefined（绝不抛）。
+ *
+ * @param {Buffer} frame - 以 zstd 魔数开头的片段（可能带着后续帧的前缀，也可能被切短）。
+ * @returns {Record<string, unknown> | undefined} 会话头。
+ */
+function parseHeaderFrame(frame) {
+  try {
+    const text = zlib.zstdDecompressSync(frame).toString('utf8')
+    const header = JSON.parse(text.split('\n')[0])
+    return header !== null && typeof header === 'object' ? header : undefined
+  } catch {
+    return undefined
   }
 }
 
