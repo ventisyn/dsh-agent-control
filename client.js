@@ -788,7 +788,7 @@
 /** 客户端 cordis 上下文：留一份，让不接收 ctx 的辅助函数也能问 uiWorkspace / workspaces。 */
 let clientCtx
 
-  /** 每个会话已删除的轮次：`sessionId -> Promise<number[]>`，避免每个标记各拉一次。 */
+  /** 每个会话已删除的轮次：`sessionId -> Promise<number[] | null>`（读失败是 null，且不留在缓存里），避免每个标记各拉一次。 */
   const deletedTurnsCache = new Map()
 
   function fallbackText(key) {
@@ -1974,6 +1974,8 @@ let clientCtx
           const load = latestLoad
           const turns = await loadDeletedTurns(sessionId)
           if (cancelled || load !== latestLoad || ref.current === null) return
+          // 读取失败：维持现状（已藏的继续藏着、没藏的不动），等下一次广播重试。
+          if (turns === null) return
           const nextDeleted = turns.includes(turn)
           // 只有「本来没删、现在删了」才播动画。
           const shouldAnimate = nextDeleted && !deleted && !animated
@@ -1986,6 +1988,8 @@ let clientCtx
           const load = latestLoad
           const turns = await loadDeletedTurns(sessionId)
           if (cancelled || load !== latestLoad || ref.current === null) return
+          // 首次读取失败：当作还没有已删信息，什么都不隐藏。
+          if (turns === null) return
           deleted = turns.includes(turn)
           if (!deleted) return
           // 页面加载时就已经是删除状态：直接隐藏，不播动画（否则每次进会话都在动）。
@@ -2640,10 +2644,15 @@ let clientCtx
   }
 
   /**
-   * 拉取（并缓存）某会话已删除的轮次；失败就当没有，界面不因此报错。
+   * 拉取（并缓存）某会话已删除的轮次；失败时界面不报错，结果是 `null`（「没读到」）。
    *
    * ⚠️ 失败**不进缓存**：早期版本把 `.catch(() => [])` 的结果也缓存下来，一次临时的网络错误
    * 就让这个会话在整页刷新之前都不再隐藏任何已删轮次。
+   *
+   * ⚠️ 失败也**不能**当成空数组交出去：「读失败」不是「服务端说没有已删轮次」。
+   * 调用方拿到 `null` 必须维持当前状态，否则重读时的一次网络错误会把已经藏好的轮次一起恢复可见。
+   *
+   * @returns {Promise<number[] | null>} 已删轮次；读取失败时 `null`。
    */
   function loadDeletedTurns(sessionId) {
     const cached = deletedTurnsCache.get(sessionId)
@@ -2652,7 +2661,7 @@ let clientCtx
       .then((payload) => (Array.isArray(payload.turns) ? payload.turns : []))
       .catch(() => {
         if (deletedTurnsCache.get(sessionId) === pending) deletedTurnsCache.delete(sessionId)
-        return []
+        return null
       })
     deletedTurnsCache.set(sessionId, pending)
     return pending

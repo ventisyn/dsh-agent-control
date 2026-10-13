@@ -1254,6 +1254,31 @@ test('挂载时那次读取迟到，不能覆盖之后广播带来的新结果',
   assert.equal(row.hidden, true, '★ 首次读取迟到后，已删的轮次仍然隐藏')
 })
 
+test('重读已删轮次时请求失败：已经藏好的行保持隐藏，不能因为一次网络错误又露出来', async (t) => {
+  // 失败的读取不是「服务端说没有已删轮次」：把它当成空列表，之前已删的轮次会一起被恢复。
+  let calls = 0
+  const browser = captureBrowser(t, () => {
+    calls += 1
+    if (calls === 1) return okTurns([7])
+    if (calls === 2) throw new Error('网络抖了一下')
+    return okTurns([7])
+  })
+  const { row, anchor } = makeRefNode()
+  const onTurnsChanged = await mountMarker(browser.listeners, anchor, 'session-refresh-fail')
+  assert.equal(row.hidden, true, '页面加载时就已删：直接隐藏')
+
+  onTurnsChanged({ detail: { sessionId: 'session-refresh-fail' } })
+  await flush()
+  assert.equal(browser.turnFetches.length, 2, '广播应当触发一次重读')
+  assert.equal(row.hidden, true, '★ 重读失败不等于「没有已删轮次」，已藏的行不能被恢复')
+
+  // 失败不进缓存：下一次广播照常重读，并且仍然是隐藏的。
+  onTurnsChanged({ detail: { sessionId: 'session-refresh-fail' } })
+  await flush()
+  assert.equal(browser.turnFetches.length, 3)
+  assert.equal(row.hidden, true)
+})
+
 // ---------------------------------------------------------------------------
 // 发布前的两条待验证项：就地刷新 vs 整页重载、DELETE_FAILED 的界面文案
 // ---------------------------------------------------------------------------
