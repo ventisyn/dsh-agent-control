@@ -1662,6 +1662,29 @@ test('重启态机：被拒退回确认态并带上原因；取消 / 关掉提�
   assert.equal(next(state, { type: 'nonsense' }), state)
 })
 
+test('重启态机：本页在重启窗口里才加载（没有重启前的样本）也要认出新进程', () => {
+  // 真机踩过：宿主 31 秒就回来了，界面却报「120 秒内没能重新连上宿主」。原因是成功判据要求
+  // `bootId` / `pid` **与重启前那次采样相比变了**，而本页是在重启窗口里才加载的（刷新、或重启由
+  // 别的标签页 / 模型发起），压根没有旧样本 —— 两条判据都永远不成立。
+  const { initial, next } = restartApi()
+  let state = initial()
+  state = next(state, {
+    type: 'status',
+    at: 200000,
+    payload: { ok: true, bootId: 'boot-x', pid: 7, pending: { restartId: 'r-2', createdAt: new Date(199000).toISOString() } },
+  })
+  assert.equal(state.phase, 'shutting-down')
+
+  state = next(state, {
+    type: 'status',
+    at: 240000,
+    payload: { ok: true, bootId: 'boot-new', pid: 9, startedAt: 230000, pending: null },
+  })
+
+  assert.equal(state.phase, 'done', '★ 没得比的时候，新进程的启动时刻就是判据')
+  assert.equal(state.waitMs, 41000)
+})
+
 test('重启态机：第一次读到 bootId 只是「记下」；pending 一出现就跟着进重启中（模型发起的重启）', () => {
   const { initial, next } = restartApi()
   let state = next(initial(), {

@@ -971,7 +971,15 @@ let clientCtx
     const next = { ...current, status: payload, bootId, pid }
     const bootChanged = current.bootId !== null && bootId !== null && bootId !== current.bootId
     const pidChanged = current.pid !== null && pid !== null && pid !== current.pid
-    if (bootChanged || pidChanged) {
+    // 第三条成功信号：**新进程的启动时刻晚于这次重启被接受的时刻**。它不需要「重启前采过样」——
+    // 上面两条都要求 `bootId` / `pid` 非 null（也就是本页在重启之前就读到过一次状态）；如果页面是在
+    // 重启窗口里才加载的（用户刷新了页面、或重启是别的标签页 / 模型发起的），它俩永远不成立，界面只能
+    // 干等到 120 秒超时——真机踩过：宿主 31 秒就回来了，界面却报「没能重新连上宿主」。
+    const startedAfterAccept = typeof current.acceptedAt === 'number'
+      && Number.isFinite(current.acceptedAt)
+      && Number.isFinite(payload.startedAt)
+      && payload.startedAt > current.acceptedAt
+    if (bootChanged || pidChanged || startedAfterAccept) {
       return { ...next, phase: 'done', waitMs: elapsedSince(current.acceptedAt, at) ?? 0, failures: 0, error: null }
     }
     const pending = payload.pending
