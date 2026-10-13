@@ -674,6 +674,148 @@ test('/restart 与 /shutdown 的拒绝码没变：仍是 RESTART_DENIED / SHUTDO
 })
 
 // ---------------------------------------------------------------------------
+// 删除失败时回滚「为了隐藏而做的归档」
+// ---------------------------------------------------------------------------
+
+/**
+ * 带状态的假工作区注册表：archiveSession / unarchiveSession 真的改一个集合，
+ * 这样断言的是「最后还在不在归档集合里」，而不只是「有没有调过」。
+ */
+function fakeArchiveRegistry({ initial = [], archiveFails = [], unarchiveFails = [] } = {}) {
+  const archived = new Set(initial)
+  const calls = []
+  const registry = {
+    list: () => [],
+    get archivedSessionIds() { return [...archived] },
+    archiveSession: async (id, options) => {
+      calls.push({ op: 'archive', id, options })
+      if (archiveFails.includes(id)) throw new Error(`宿主拒绝归档 ${id}`)
+      archived.add(id)
+    },
+    unarchiveSession: async (id) => {
+      calls.push({ op: 'unarchive', id })
+      if (unarchiveFails.includes(id)) throw new Error(`宿主拒绝取消归档 ${id}`)
+      archived.delete(id)
+    },
+  }
+  return { registry, calls, archived }
+}
+
+/** 活着的会话 + 一个能记账的 registry 的 host（磁盘上没有目录时，删除会 TARGET_NOT_FOUND）。 */
+function makeLiveSessionHost(sessionId, registry) {
+  const live = { id: sessionId }
+  return makeHost({
+    sessions: { get: (id) => (id === sessionId ? live : undefined), list: () => [live] },
+    workspaceRegistry: registry,
+  })
+}
+
+test('★ 删除失败（TARGET_NOT_FOUND）：自己为隐藏加的归档标记被撤回，原错误原样返回', async (t) => {
+  workspaceHome(t) // 空的 sessions：磁盘上没有目录，deleteSession 必然 TARGET_NOT_FOUND
+  const { registry, calls, archived } = fakeArchiveRegistry()
+  const host = makeLiveSessionHost('session-abc', registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 404)
+  assert.equal(response.body.error.code, ERROR_CODES.targetNotFound, '★ 原来的错误必须原样返回')
+  assert.deepEqual(calls.map((c) => c.op), ['archive', 'unarchive'], '先归档藏行，删除失败后再撤回')
+  assert.deepEqual(calls[0].options, { stopActivity: true })
+  assert.equal(calls[1].id, calls[0].id, '撤回的正是归档成功的那一种拼写')
+  assert.equal(archived.size, 0, '★ 失败之后不能还留着那条隐藏标记')
+})
+
+test('删除成功：归档标记保留（它还要压住内存里摘不掉的那条记录），不会撤回', async (t) => {
+  const home = workspaceHome(t)
+  makeSessionDir(home, 'session-abc')
+  const { registry, calls, archived } = fakeArchiveRegistry()
+  const host = makeLiveSessionHost('session-abc', registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 200)
+  assert.deepEqual(calls.map((c) => c.op), ['archive'], '成功路径不能有 unarchive')
+  assert.deepEqual([...archived], ['session-abc'])
+})
+
+test('★ 调用前就已归档（用户原本的归档）：删除失败时不能替用户解除', async (t) => {
+  workspaceHome(t)
+  for (const initial of [['session-abc'], ['abc']]) {
+    const { registry, calls, archived } = fakeArchiveRegistry({ initial })
+    const host = makeLiveSessionHost('session-abc', registry)
+
+    const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+    assert.equal(response.status, 404, '原错误照常返回')
+    assert.equal(calls.some((c) => c.op === 'unarchive'), false, `★ 原本在归档集合里（${initial}）就不是我们加的，不能撤`)
+    assert.ok(initial.every((id) => archived.has(id)), '用户原本的归档原封不动')
+  }
+})
+
+test('归档本身就没成功（宿主拒绝）：删除失败时没有可撤的东西，也不乱调 unarchive', async (t) => {
+  workspaceHome(t)
+  const { registry, calls } = fakeArchiveRegistry({ archiveFails: ['session-abc', 'abc'] })
+  const host = makeLiveSessionHost('session-abc', registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 404)
+  assert.equal(calls.some((c) => c.op === 'unarchive'), false)
+})
+
+test('★ 撤回自己也失败：只记 warn，原错误仍原样返回（不被回滚的错误盖掉）', async (t) => {
+  workspaceHome(t)
+  const { registry, calls } = fakeArchiveRegistry({ unarchiveFails: ['session-abc', 'abc'] })
+  const host = makeLiveSessionHost('session-abc', registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'session-abc' }) })
+
+  assert.equal(response.status, 404)
+  assert.equal(response.body.error.code, ERROR_CODES.targetNotFound, '★ 返回的必须还是删除的那个错误')
+  assert.doesNotMatch(response.body.error.message, /宿主拒绝取消归档/, '回滚的错误不许混进响应')
+  assert.deepEqual(calls.filter((c) => c.op === 'unarchive').map((c) => c.id), ['session-abc', 'abc'], '两种拼写都试过')
+  assert.match(host.warnings.join('\n'), /撤回隐藏用的归档标记也失败了/)
+  assert.deepEqual(host.errors, [], '回滚失败不是内部故障')
+})
+
+test('撤回时两种拼写逐个试：第一种抛错、第二种成功就算撤回了', async (t) => {
+  workspaceHome(t)
+  // 像真实宿主那样：按规范 id 记账——请求 `abc` 归档，记下的却是 `session-abc`；
+  // 对没记过的那种拼写取消归档会抛错。撤回先试归档成功的 `abc`（抛错），必须退到 `session-abc`。
+  const archived = new Set()
+  const calls = []
+  const registry = {
+    list: () => [],
+    get archivedSessionIds() { return [...archived] },
+    archiveSession: async (id) => { calls.push({ op: 'archive', id }); archived.add('session-abc') },
+    unarchiveSession: async (id) => {
+      calls.push({ op: 'unarchive', id })
+      if (!archived.has(id)) throw new Error(`${id} 不在归档集合里`)
+      archived.delete(id)
+    },
+  }
+  const host = makeLiveSessionHost('abc', registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'abc' }) })
+
+  assert.equal(response.status, 404)
+  assert.deepEqual(calls.filter((c) => c.op === 'unarchive').map((c) => c.id), ['abc', 'session-abc'], '★ 第一种失败后必须退到第二种')
+  assert.equal(archived.size, 0, '★ 最终撤回成功')
+  assert.deepEqual(host.warnings.filter((w) => w.includes('撤回')), [], '第二种成功了就不该有失败 warning')
+})
+
+test('不是活会话：根本没有归档这一步，也就没有回滚', async (t) => {
+  workspaceHome(t)
+  const { registry, calls } = fakeArchiveRegistry()
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] }, workspaceRegistry: registry })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'abc' }) })
+
+  assert.equal(response.status, 404)
+  assert.deepEqual(calls, [])
+})
+
+// ---------------------------------------------------------------------------
 // 热重启（M3）：状态码映射、可信校验、守卫链、状态接口、续作投递
 // ---------------------------------------------------------------------------
 

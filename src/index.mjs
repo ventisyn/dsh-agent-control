@@ -387,16 +387,26 @@ async function handleDeleteSession(ctx, payload, _url, req) {
   // 「不属于任何工作区」的身份挂回侧栏。公开的 `archiveSession` 是宿主自己的「从列表里藏起来」能力，
   // 先借它把那行藏起来——**顺序必须是「先归档、再删」**：真机实测删完再归档会被宿主拒绝，
   // 报 `live sessions and session persistence hold no such session`（那时会话已经不存在了）。
-  const hidden = isLive(sessionId) ? await archiveForHiding(ctx, sessionId, warnings) : false
-  const result = await deleteSession({
-    sessionsRoot: sessionsRoot(),
-    agents: ctx.get?.('agents'),
-    isLive,
-    workspaceRegistry: ctx.get?.('workspaceRegistry'),
-    projectionCache: projectionCacheTable(ctx),
-    stopTimeoutMs: DEFAULT_STOP_TIMEOUT_MS,
-    keepArchived: hidden,
-  }, sessionId)
+  const hiding = isLive(sessionId)
+    ? await archiveForHiding(ctx, sessionId, warnings)
+    : { hidden: false, ownMark: false, name: undefined }
+  let result
+  try {
+    result = await deleteSession({
+      sessionsRoot: sessionsRoot(),
+      agents: ctx.get?.('agents'),
+      isLive,
+      workspaceRegistry: ctx.get?.('workspaceRegistry'),
+      projectionCache: projectionCacheTable(ctx),
+      stopTimeoutMs: DEFAULT_STOP_TIMEOUT_MS,
+      keepArchived: hiding.hidden,
+    }, sessionId)
+  } catch (error) {
+    // 删除没成功，那一藏就不该留下：否则接口报失败、会话却已经从侧栏消失了。
+    // 回滚自己加的那条标记；它绝不能盖掉这里要继续抛出的原错误（rollbackHidingArchive 不会抛）。
+    if (hiding.ownMark) await rollbackHidingArchive(ctx, sessionId, hiding.name)
+    throw error
+  }
   warnings.push(...result.warnings, ...result.workspace.warnings)
   if (!result.workspace.available) {
     warnings.push('这个部署没有工作区注册表，工作区记账那一段没有执行')
@@ -427,17 +437,25 @@ async function handleDeleteSession(ctx, payload, _url, req) {
  * **这不是用归档代替删除**：磁盘、工作区记账、投影缓存随后都会真的删掉；重启之后那条内存记录不复存在，
  * 这条归档标记只剩一条指向已删会话的孤儿（宿主的列表里已经没有它）。失败只降级成 warning。
  *
+ * **删除失败时要把这一藏撤回**（见 `rollbackHidingArchive`），但只撤「自己加的」那一条：所以这里要先记下
+ * 调用前它是不是已经在归档集合里（用户原本就归档过的会话，回滚时绝不能替用户解除）。
+ *
  * @param {any} ctx - cordis 上下文。
  * @param {string} sessionId - 目标会话。
  * @param {string[]} warnings - 收集降级说明。
- * @returns {Promise<boolean>} 成功标记为归档时 true（调用方据此保留这条标记）。
+ * @returns {Promise<{ hidden: boolean, ownMark: boolean, name: string | undefined }>} `hidden`：成功标记为归档
+ *   （调用方据此保留这条标记）；`ownMark`：这条标记是本次调用加的（调用前不在归档集合里）——只有它才允许回滚；
+ *   `name`：归档成功的那种 id 拼写（回滚时先试它）。
  */
 async function archiveForHiding(ctx, sessionId, warnings) {
   const registry = safeCall(() => ctx.get?.('workspaceRegistry'))
   if (registry === undefined || registry === null || typeof registry.archiveSession !== 'function') {
     warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（宿主没有归档能力），它可能留到下次重启`)
-    return false
+    return { hidden: false, ownMark: false, name: undefined }
   }
+  // 必须在归档**之前**读：两种拼写任一已在集合里，就说明是用户原本的归档，不是我们加的。
+  const alreadyArchived = Array.isArray(registry.archivedSessionIds)
+    && sessionDirNames(sessionId).some((name) => registry.archivedSessionIds.includes(name))
   // ⚠️ **两种拼写都要试**：宿主的归档先按存储里的规范 id 找会话（`sessionKnown`：先查 store、再查头部
   // 索引），拿不匹配的那一种去问会被直接拒绝——真机上就是这么报的：
   // `cannot archive session '…': live sessions and session persistence hold no such session`。
@@ -445,12 +463,47 @@ async function archiveForHiding(ctx, sessionId, warnings) {
   for (const name of sessionDirNames(sessionId)) {
     try {
       await registry.archiveSession(name, { stopActivity: true })
-      return true
+      return { hidden: true, ownMark: !alreadyArchived, name }
     } catch (error) {
       failures.push(`${name}：${error instanceof Error ? error.message : String(error)}`)
     }
   }
   warnings.push(`没能把 ${sessionId} 从侧栏隐藏起来（归档失败：${failures.join('；')}），它可能留到下次重启`)
+  return { hidden: false, ownMark: false, name: undefined }
+}
+
+/**
+ * 删除失败后，撤回 `archiveForHiding` 加的那条归档标记。
+ *
+ * 先试归档成功的那种拼写，再试另一种，**逐个尝试到成功为止**；失败只记 logger warn。
+ * 这个函数**永不抛出**：它在 catch 块里调用，绝不能让回滚自己的错误盖掉原本要抛的那个删除错误。
+ *
+ * ⚠️ **撤不回来的部分**：`archiveSession(name, { stopActivity: true })` 已经把那个会话的 agent 停掉了，
+ * 取消归档只是让它重新出现在列表里，**不会让 agent 活过来**。这是这条路径固有的代价，不假装能撤销。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {string} sessionId - 目标会话。
+ * @param {string | undefined} archivedName - 归档成功的那种拼写（先试它）。
+ * @returns {Promise<boolean>} 是否撤回成功（调用方一般不用看，仅供测试与排障）。
+ */
+async function rollbackHidingArchive(ctx, sessionId, archivedName) {
+  const registry = safeCall(() => ctx.get?.('workspaceRegistry'))
+  const warn = (message) => safeCall(() => ctx.logger?.warn?.(`${PLUGIN_NAME}: ${message}`))
+  if (registry === undefined || registry === null || typeof registry.unarchiveSession !== 'function') {
+    warn(`删除 ${sessionId} 失败，但宿主没有取消归档的能力，那条为隐藏而加的归档标记没有撤回`)
+    return false
+  }
+  const names = [...new Set([archivedName, ...sessionDirNames(sessionId)].filter((name) => typeof name === 'string'))]
+  const failures = []
+  for (const name of names) {
+    try {
+      await registry.unarchiveSession(name)
+      return true
+    } catch (error) {
+      failures.push(`${name}：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  warn(`删除 ${sessionId} 失败，撤回隐藏用的归档标记也失败了（${failures.join('；')}），它可能一直藏着直到下次重启`)
   return false
 }
 
