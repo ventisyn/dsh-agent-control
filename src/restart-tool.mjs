@@ -1116,7 +1116,10 @@ export async function deliverResumes(ctx, deps) {
   }
 
   const previous = readLast(deps.dir) ?? {}
-  const measured = Number.isFinite(previous.durationMs) ? previous.durationMs : undefined
+  // last.json 跨重启复用：辅助进程这一次的记录多半还没写，读到的往往是**上一次**重启的。
+  // 只有 restartId 对得上才算「这一次的实测」，否则退回下面「待办创建 → 现在」的估计（同 writeLastMerged 的约定）。
+  const sameRestart = textOf(pending.restartId) !== '' && previous.restartId === textOf(pending.restartId)
+  const measured = sameRestart && Number.isFinite(previous.durationMs) ? previous.durationMs : undefined
   const fromPending = Number.isFinite(pending.createdAt) ? Math.max(0, now - pending.createdAt) : undefined
   const message = buildResumeMessage({
     reason: pending.reason,

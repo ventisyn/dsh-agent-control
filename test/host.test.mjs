@@ -964,6 +964,60 @@ test('取消时辅助进程的 kill 本身抛错：只记日志，取消流程�
 })
 
 // ---------------------------------------------------------------------------
+// 续作消息里的耗时：只认同一次重启的实测，不能拿上一次的
+// ---------------------------------------------------------------------------
+
+test('★ 续作消息的耗时：last.json 是上一次重启留下的（restartId 不同）时不能拿它的 durationMs', async (t) => {
+  const home = tempHome(t)
+  const dir = restartDir(home)
+  const prompts = []
+  const { ctx } = makeToolContext({
+    sessionController: {
+      resolveAgent: async (sessionId) => ({ agent: { id: sessionId } }),
+      prompt: async (request) => { prompts.push(request); return { accepted: true } },
+    },
+  })
+  const deps = makeRestartDeps(ctx, { dshHome: home })
+  // 上一次重启的结果还躺在 last.json 里（这一次的辅助进程还没来得及写）。
+  writeLast(dir, { restartId: 'r-old', ok: true, durationMs: 99000, finishedAt: 1 })
+  writePending(dir, {
+    restartId: 'r-new',
+    sessionId: 'session-me',
+    source: 'model',
+    reason: '这一次',
+    state: 'helper-started',
+    createdAt: Date.now() - 2000,
+    oldPid: 1,
+  })
+
+  const result = await deliverResumes(ctx, deps)
+
+  assert.equal(result.resume, 'delivered')
+  const text = prompts[0].content[0].text
+  assert.doesNotMatch(text, /99 秒/, '★ 不能把上一次重启的 99 秒当成这一次的耗时')
+  assert.match(text, /耗时：[1-9]\d? 秒/, '退回「待办创建 → 现在」的估计（约 2 秒）')
+})
+
+test('续作消息的耗时：last.json 是同一次重启（restartId 相同）的实测时仍然优先用它', async (t) => {
+  const home = tempHome(t)
+  const dir = restartDir(home)
+  const prompts = []
+  const { ctx } = makeToolContext({
+    sessionController: {
+      resolveAgent: async (sessionId) => ({ agent: { id: sessionId } }),
+      prompt: async (request) => { prompts.push(request); return { accepted: true } },
+    },
+  })
+  const deps = makeRestartDeps(ctx, { dshHome: home })
+  writeLast(dir, { restartId: 'r-same', ok: true, durationMs: 6400, finishedAt: 1 })
+  writePending(dir, { restartId: 'r-same', sessionId: 'session-me', source: 'model', reason: '同一次', state: 'helper-started', createdAt: Date.now() - 20000, oldPid: 1 })
+
+  await deliverResumes(ctx, deps)
+
+  assert.match(prompts[0].content[0].text, /耗时：6 秒/)
+})
+
+// ---------------------------------------------------------------------------
 // 幽灵会话经路由：200 + ghost: true，并通知界面
 // ---------------------------------------------------------------------------
 
