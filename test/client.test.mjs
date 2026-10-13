@@ -1279,6 +1279,47 @@ test('重读已删轮次时请求失败：已经藏好的行保持隐藏，不�
   assert.equal(row.hidden, true)
 })
 
+test('轮次删除弹窗里指认目标的那一句也走词表（英文界面不能冒出中文）', (t) => {
+  // describeTarget 曾把「选中的这条回复」写死在代码里，词表里没有对应的键。
+  const browser = captureBrowser(t, () => okTurns([]))
+  const originalNavigator = globalThis.navigator
+  t.after(() => {
+    Object.defineProperty(globalThis, 'navigator', { value: originalNavigator, configurable: true, writable: true })
+  })
+  loaded.apply(makeContext())
+  const dialog = registrations.find((entry) => entry.name === 'shell.overlay')
+
+  /** 渲染一次轮次删除确认框，返回正文。 */
+  const describeWith = (language, props) => {
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { languages: [language], language },
+      configurable: true,
+      writable: true,
+    })
+    renderComponent(dialog.component, props)
+    const onRequest = browser.listeners
+      .filter((item) => item.type === 'dsh-agent-control:request-delete')
+      .at(-1)?.handler
+    assert.equal(typeof onRequest, 'function', '弹窗必须监听 request-delete')
+    onRequest({ detail: { kind: 'turn', sessionId: 'session-i18n', assistantMessageId: 'msg-i18n' } })
+    const tree = renderUntilStable(dialog.component, props)
+    const confirmBox = findElement(tree, (element) => element.type?.name === 'RiskConfirmation')
+    assert.ok(confirmBox, '有目标时应当渲染确认框')
+    return confirmBox.props.description
+  }
+
+  const english = describeWith('en-US', {})
+  assert.ok(english.includes('msg-i18n'), '要指认到那条回复的 id')
+  assert.doesNotMatch(english, /[\u4e00-\u9fff]/, '★ 英文界面的弹窗正文不该有中文')
+
+  const chinese = describeWith('zh-CN', {})
+  assert.ok(chinese.includes('选中的这条回复'), '中文界面保持原文案')
+
+  // 宿主给了取词函数时，这一句也要经它取词。
+  const viaHost = describeWith('en-US', { t: (key) => key })
+  assert.ok(viaHost.includes('dialog.turnTarget'), '★ 指认目标的文案应当通过 t() 取词')
+})
+
 // ---------------------------------------------------------------------------
 // 发布前的两条待验证项：就地刷新 vs 整页重载、DELETE_FAILED 的界面文案
 // ---------------------------------------------------------------------------

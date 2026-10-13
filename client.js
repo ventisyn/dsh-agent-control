@@ -516,6 +516,7 @@
     'dialog.turnBody': '将从模型的上下文中移除这一轮（问题、回复与该轮的工具记录），原位置只留下一句「这里有一轮对话已被删除」的提示。会话本身、其它轮次与日志都保留——被删内容仍留在日志与附件里，这不是彻底清除。',
     'dialog.ackSession': '我明白这个会话会被永久删除',
     'dialog.ackTurn': '我明白这一轮会从模型上下文中移除',
+    'dialog.turnTarget': '选中的这条回复',
     'dialog.cancel': '取消',
     'dialog.close': '关闭',
     'dialog.confirm': '删除',
@@ -646,6 +647,7 @@
     'dialog.turnBody': 'This removes the turn (question, reply, and its tool records) from the model context, leaving only a short "a turn was deleted here" note in its place. The session, other turns, and the log stay — the deleted content still exists in the log and attachments, so this is not a secure erase.',
     'dialog.ackSession': 'I understand this session will be permanently deleted',
     'dialog.ackTurn': 'I understand this turn will leave the model context',
+    'dialog.turnTarget': 'The selected reply',
     'dialog.cancel': 'Cancel',
     'dialog.close': 'Close',
     'dialog.confirm': 'Delete',
@@ -2128,7 +2130,7 @@ let clientCtx
       const renderDeleteConfirm = () => {
         if (target === null) return null
         const isSession = target.kind === 'session'
-        const lines = [describeTarget(target)]
+        const lines = [describeTarget(target, t)]
         lines.push(isSession ? t('dialog.sessionBody') : t('dialog.turnBody'))
         if (resolving) lines.push(t('dialog.resolving'))
         if (error !== null) lines.push(`⚠ ${error}`)
@@ -2421,11 +2423,11 @@ let clientCtx
    * 真正的轮次号由宿主在删除后返回（界面不显示），服务端也能用 `/turns` 查。
    * 目标本来就是靠「点了哪条回复」确定的，这里只要把删的是哪一条指认清楚。
    */
-  function describeTarget(target) {
+  function describeTarget(target, t = translate) {
     if (target.kind === 'session') {
       return target.title ? `${target.title}\n${target.sessionId}` : String(target.sessionId)
     }
-    return `选中的这条回复\n${target.assistantMessageId}`
+    return `${t('dialog.turnTarget')}\n${target.assistantMessageId}`
   }
 
   /**
