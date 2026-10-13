@@ -351,6 +351,22 @@ async function handleDeleteSession(ctx, payload) {
     })
     if (sent !== true) warnings.push(`没能通知界面「${id} 已删除」（宿主没有 emit 能力），侧栏可能要刷新之后才会少掉它`)
   }
+  // 让这一行从侧栏真正消失。宿主的会话列表把「内存里还活着」的会话也算进去，而插件没有公开 API
+  // 能把那条记录摘掉——删完之后它会以「不属于任何工作区」的身份挂回侧栏（真机实测：掉进「未分组」）。
+  // 公开的 `archiveSession` 正是宿主的「从列表里藏起来」能力（归档行默认不显示，且会立刻推给界面），
+  // 先借它补上「内存记录消失之前」这段窗口。**这不是用归档代替删除**：磁盘、工作区记账、投影缓存
+  // 都已经真的删掉了；重启之后那条内存记录不复存在，这条归档标记会变成一条指向已删会话的孤儿
+  // （无害：宿主的列表里已经没有它了）。失败只降级成 warning，绝不影响删除本身。
+  const archive = safeCall(() => ctx.get?.('workspaceRegistry')?.archiveSession?.(result.sessionId, { stopActivity: true }))
+  if (archive === undefined || typeof archive.then !== 'function') {
+    warnings.push(`没能把 ${result.sessionId} 从侧栏隐藏起来（宿主没有归档能力），它可能留到下次重启`);
+  } else {
+    try {
+      await archive
+    } catch (error) {
+      warnings.push(`没能把 ${result.sessionId} 从侧栏隐藏起来（归档失败：${error instanceof Error ? error.message : String(error)}），它可能留到下次重启`)
+    }
+  }
   return { status: 200, body: { ok: true, ...result, warnings } }
 }
 

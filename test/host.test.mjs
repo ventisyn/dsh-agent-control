@@ -242,6 +242,40 @@ test('删掉会话后通知界面：发出 api-session/removed（否则它会掉
   assert.deepEqual(removed, ['session-abc'], '★ 必须告诉界面这个会话没了')
 })
 
+test('删掉之后把这一行从侧栏藏起来：调用 workspaceRegistry.archiveSession', async (t) => {
+  // 宿主的会话列表把「内存里还活着」的会话也算进去，而插件没有公开 API 能把内存记录摘掉；
+  // 不藏的话，删完的会话会以「不属于任何工作区」的身份挂回侧栏（真机实测掉进「未分组」）。
+  const home = tempHome(t)
+  makeSessionDir(home, 'abc')
+  const archived = []
+  const host = makeHost({
+    sessions: { get: () => undefined, list: () => [] },
+    workspaceRegistry: { list: () => [], archiveSession: async (id, options) => archived.push([id, options]) },
+  })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'abc' }) })
+
+  assert.equal(response.status, 200)
+  assert.equal(archived.length, 1, '★ 删除后必须把这一行藏起来')
+  assert.equal(archived[0][0], 'abc')
+  assert.deepEqual(response.body.warnings.filter((w) => w.includes('隐藏')), [], '藏成功就不该有降级 warning')
+})
+
+test('归档能力不可用时只降级成 warning，删除本身照样成功', async (t) => {
+  const home = tempHome(t)
+  makeSessionDir(home, 'abc')
+  const host = makeHost({
+    sessions: { get: () => undefined, list: () => [] },
+    workspaceRegistry: { list: () => [], archiveSession: async () => { throw new Error('宿主拒绝了归档') } },
+  })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: 'abc' }) })
+
+  assert.equal(response.status, 200, '★ 藏不起来不许影响删除结果')
+  assert.match(response.body.warnings.join('\n'), /没能把 abc 从侧栏隐藏起来/)
+  assert.match(response.body.warnings.join('\n'), /宿主拒绝了归档/)
+})
+
 test('列表的 live 来自 store 现查：会话关掉后立刻不再是 live（不依赖事件订阅）', async (t) => {
   // 早期版本用模块级集合 + 只订阅一次的事件记账；插件重新 apply 后监听已被注销，
   // 集合里留着早已关掉的会话，界面一直报「还在活动状态」。
