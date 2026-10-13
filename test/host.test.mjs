@@ -816,6 +816,61 @@ test('不是活会话：根本没有归档这一步，也就没有回滚', async
 })
 
 // ---------------------------------------------------------------------------
+// 幽灵会话经路由：200 + ghost: true，并通知界面
+// ---------------------------------------------------------------------------
+
+test('★ 幽灵会话经路由：200、ghost: true、记账被清，并照常发 api-session/removed；不去归档、不动别的目录', async (t) => {
+  const home = workspaceHome(t)
+  const seeded = seedDangerousFixture(home)
+  const id = 'ghost0000-0000-0000-0000-000000000001'
+  const { registry, calls, archived } = fakeArchiveRegistry({ initial: [id] })
+  const detached = []
+  registry.list = () => [{ id: 'ws', sessionIds: [id], detachSession: async (target) => { detached.push(target) } }]
+  const host = makeHost({ sessions: { get: () => undefined, list: () => [] }, workspaceRegistry: registry })
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: id }) })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.body.ghost, true)
+  assert.deepEqual(response.body.removed, [])
+  assert.deepEqual(detached, [id])
+  assert.equal(archived.size, 0, '幽灵的归档标记被清')
+  assert.deepEqual(calls.filter((c) => c.op === 'archive'), [], '不是活会话，不借归档藏行')
+  assert.deepEqual(host.emitted.filter((e) => e.name === 'api-session/removed').map((e) => e.args[0]), [id])
+  assert.deepEqual(snapshotHomeSessions(home), seeded)
+})
+
+test('经路由：store 里活着的是另一种拼写（session-<id>）、请求用裸 id，也算活会话，不当幽灵清', async (t) => {
+  workspaceHome(t)
+  const id = 'fresh000-0000-0000-0000-000000000008'
+  const { registry } = fakeArchiveRegistry()
+  const detached = []
+  registry.list = () => [{ id: 'ws', sessionIds: [`session-${id}`], detachSession: async (target) => { detached.push(target) } }]
+  const host = makeLiveSessionHost(`session-${id}`, registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: id }) })
+
+  assert.equal(response.status, 404, '★ 两种拼写都查，活着就不是幽灵')
+  assert.deepEqual(detached, [])
+})
+
+test('经路由：活会话没有目录（新开还没落盘）仍是 404，且那一藏被撤回、记账不动', async (t) => {
+  workspaceHome(t)
+  const id = 'fresh000-0000-0000-0000-000000000009'
+  const { registry, calls } = fakeArchiveRegistry()
+  const detached = []
+  registry.list = () => [{ id: 'ws', sessionIds: [id], detachSession: async (target) => { detached.push(target) } }]
+  const host = makeLiveSessionHost(id, registry)
+
+  const response = await call(host, PATHS.sessionDelete, { body: JSON.stringify({ sessionId: id }) })
+
+  assert.equal(response.status, 404)
+  assert.equal(response.body.error.code, ERROR_CODES.targetNotFound)
+  assert.deepEqual(detached, [], '★ 记账不能动')
+  assert.deepEqual(calls.map((c) => c.op), ['archive', 'unarchive'])
+})
+
+// ---------------------------------------------------------------------------
 // 热重启（M3）：状态码映射、可信校验、守卫链、状态接口、续作投递
 // ---------------------------------------------------------------------------
 

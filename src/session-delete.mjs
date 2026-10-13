@@ -15,7 +15,7 @@ import path from 'node:path'
 // 命名空间导入：老版本 Node 没有 zstd，具名导入会在链接期就让整个模块加载失败。
 import * as zlib from 'node:zlib'
 
-import { ERROR_CODES, ControlError, sessionDirNames } from './shared.mjs'
+import { ERROR_CODES, ControlError, assertSessionId, sessionDirNames } from './shared.mjs'
 
 /** zstd 帧魔数（会话日志是多帧拼接的 zstd）。 */
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
@@ -205,7 +205,10 @@ export async function detachFromWorkspaces(registry, sessionId, options = {}) {
  * 提示文案必须照实说，不能再叫用户「先切走」。
  *
  * 顺序是刻意的：**没删净就绝不解除工作区记账、也不清缓存**——否则会话会以半删除状态掉进「未分组」。
- * 同理，**磁盘上根本没有目录时什么都不做**（不停 agent、不动记账），直接报 TARGET_NOT_FOUND。
+ * 同理，**磁盘上根本没有目录时通常什么都不做**（不停 agent、不动记账），直接报 TARGET_NOT_FOUND；
+ * 唯一的例外是三条同时满足的「幽灵会话」（磁盘与子代理后代都没有目录、目标不活在本进程里、
+ * 工作区记账里确实有它）：只清记账与投影缓存，结果里 `ghost: true`。目标活着但磁盘上还没有目录
+ * （刚开、日志还没落盘的新会话）仍然是 TARGET_NOT_FOUND，不动记账。
  *
  * @param {object} deps - 注入的依赖（见各字段）。
  * @param {string} deps.sessionsRoot - `$DSH_HOME/sessions`。
@@ -237,6 +240,12 @@ export async function deleteSession(deps, sessionId) {
 
   const rootDirs = findSessionDirs(sessionsRoot, sessionId)
   if (rootDirs.length === 0) {
+    // 磁盘上没有目录。绝大多数情况下就是「找不到」，什么都不做；唯一的例外是**幽灵会话**：
+    // 只剩工作区记账里的一条（目录早就没了、进程里也没有它），否则这条记账永远清不掉。
+    // 保守判据（三条同时满足才动手）：磁盘上没有任何目录（含子代理后代）、目标不活在本进程里、记账里确实有它。
+    if (!wasLive && !hasDescendantsOnDisk(sessionsRoot, sessionId) && isTrackedInRegistry(workspaceRegistry, sessionId)) {
+      return cleanGhostSession({ workspaceRegistry, projectionCache }, sessionId)
+    }
     throw new ControlError(ERROR_CODES.targetNotFound, `找不到会话 ${sessionId}`)
   }
 
@@ -313,6 +322,76 @@ export async function deleteSession(deps, sessionId) {
     workspace,
     projectionCache: cache,
     warnings,
+  }
+}
+
+/**
+ * 磁盘上有没有以这个会话为父的子代理会话（只要有一个，就说明它不是「什么都没剩」的幽灵）。
+ *
+ * @param {string} sessionsRoot - `$DSH_HOME/sessions`。
+ * @param {string} sessionId - 会话 id。
+ * @returns {boolean} 有子代理后代目录时 true。
+ */
+function hasDescendantsOnDisk(sessionsRoot, sessionId) {
+  return findSubagentDescendants(sessionsRoot, sessionId).descendants.length > 0
+}
+
+/**
+ * 工作区记账里有没有这个会话：工作区的会话列表，或归档 / 置顶集合（两种拼写都认）。
+ *
+ * @param {any} registry - `ctx.workspaceRegistry`。
+ * @param {string} sessionId - 会话 id。
+ * @returns {boolean} 记账里确实有它时 true；注册表不可用或枚举失败一律 false（拿不准就当没有）。
+ */
+function isTrackedInRegistry(registry, sessionId) {
+  if (registry === undefined || registry === null || typeof registry.list !== 'function') return false
+  // id 形状不合法（"."、"session-" 之类）的一律不当幽灵：这条路径虽然不碰磁盘，也不该替非法 id 动记账。
+  try {
+    assertSessionId(sessionId)
+  } catch {
+    return false
+  }
+  const names = sessionDirNames(sessionId)
+  const has = (ids) => Array.isArray(ids) && names.some((name) => ids.includes(name))
+  if (has(registry.archivedSessionIds) || has(registry.pinnedSessionIds)) return true
+  return safeList(registry, undefined).some((workspace) => has(workspace?.sessionIds))
+}
+
+/**
+ * 清掉一个幽灵会话：只动工作区记账（含归档 / 置顶集合）与投影缓存。
+ *
+ * **不停 agent、不删任何目录**——调用方已经确认磁盘上什么都没有、进程里也没有它。
+ * 记账一条都没清成、却有失败时抛 DELETE_FAILED，绝不把「没清掉」说成成功。
+ *
+ * @param {object} deps - `workspaceRegistry` 与 `projectionCache`。
+ * @param {string} sessionId - 会话 id。
+ * @returns {Promise<object>} 与 `deleteSession` 同形的结果，`ghost: true`、`removed` 为空数组。
+ * @throws {ControlError} 记账没清掉且有失败时抛 DELETE_FAILED。
+ */
+async function cleanGhostSession(deps, sessionId) {
+  const workspace = await detachFromWorkspaces(deps.workspaceRegistry, sessionId)
+  const cleaned = workspace.detached || workspace.unarchived || workspace.unpinned
+  if (!cleaned && workspace.failures.length > 0) {
+    throw new ControlError(
+      ERROR_CODES.deleteFailed,
+      `会话 ${sessionId} 只剩工作区记账，但记账没有清掉：${workspace.failures.join('；')}`,
+      { detail: { ghost: true } },
+    )
+  }
+  const cache = await removeProjectionCache(deps.projectionCache, [sessionId])
+  return {
+    sessionId,
+    ghost: true,
+    dirs: [],
+    removed: [],
+    descendants: [],
+    detached: workspace.detached,
+    stopped: false,
+    wasLive: false,
+    liveDescendants: [],
+    workspace,
+    projectionCache: cache,
+    warnings: ['磁盘上已经没有这个会话的目录，只清理了工作区记账与投影缓存', ...cache.warnings],
   }
 }
 

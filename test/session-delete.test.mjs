@@ -289,6 +289,8 @@ test('listSessions 在记账用带前缀拼写、磁盘用裸拼写时也只列�
 
 test('磁盘上没有目录时什么都不做：不停 agent、不动记账，直接 TARGET_NOT_FOUND', async (t) => {
   // 早期版本先清了记账才报「找不到」：一次 404 背后其实改动了工作区。
+  // 注意：只有目标**活在本进程里**（刚开、日志还没落盘）时才保持这个行为；不活的、只剩记账的是「幽灵会话」，
+  // 会被清掉（见本文件末尾的幽灵会话用例）。所以这里 isLive 为真。
   const sessions = tempSessionsRoot(t)
   const calls = []
   const workspaceRegistry = {
@@ -299,7 +301,7 @@ test('磁盘上没有目录时什么都不做：不停 agent、不动记账，�
   const agents = { get: () => ({ status: 'running', cancel: () => calls.push('cancel'), whenIdle: async () => {} }) }
 
   await assert.rejects(
-    () => deleteSession({ sessionsRoot: sessions, agents, workspaceRegistry }, 'ghost'),
+    () => deleteSession({ sessionsRoot: sessions, agents, workspaceRegistry, isLive: (id) => id === 'ghost' }, 'ghost'),
     (error) => error.code === ERROR_CODES.targetNotFound,
   )
   assert.deepEqual(calls, [], '★ 报「找不到」时不能有任何副作用')
@@ -693,4 +695,146 @@ test('坏文件 / 非 zstd / 只有魔数 / 截断的帧：返回 undefined，�
     assert.doesNotThrow(() => readSessionHeader(dir), name)
     assert.equal(readSessionHeader(dir), undefined, name)
   }
+})
+
+// ---------------------------------------------------------------------------
+// 幽灵会话：只剩工作区记账、磁盘上已经没有目录
+// ---------------------------------------------------------------------------
+
+/** 带状态的假注册表：记账 / 归档 / 置顶三个集合，detach / unarchive / unpin 真的改它们，并记录调用。 */
+function fakeGhostRegistry({ sessionIds = [], archived = [], pinned = [], detachFails = false } = {}) {
+  const state = { sessionIds: new Set(sessionIds), archived: new Set(archived), pinned: new Set(pinned) }
+  const calls = []
+  const registry = {
+    list: () => [{
+      id: 'ws-1',
+      title: 'alpha',
+      path: 'D:\\work\\alpha',
+      get sessionIds() { return [...state.sessionIds] },
+      detachSession: async (id) => {
+        calls.push(`detach:${id}`)
+        if (detachFails) throw new Error('记账表锁住了')
+        state.sessionIds.delete(id)
+      },
+    }],
+    get archivedSessionIds() { return [...state.archived] },
+    get pinnedSessionIds() { return [...state.pinned] },
+    unarchiveSession: async (id) => { calls.push(`unarchive:${id}`); state.archived.delete(id) },
+    unpinSession: async (id) => { calls.push(`unpin:${id}`); state.pinned.delete(id) },
+  }
+  return { registry, state, calls }
+}
+
+test('★ 幽灵会话（只在记账里、磁盘没有目录、进程里也没有）：记账 / 归档 / 置顶 / 投影缓存都被清，不停 agent、不删目录', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const seeded = seedTwoWorkspaces(sessions) // 别的会话，必须原封不动
+  const id = 'ghost0000-0000-0000-0000-000000000001'
+  const { registry, state, calls } = fakeGhostRegistry({ sessionIds: [id, 'other'], archived: [id], pinned: [id] })
+  const cache = fakeCacheTable([id, `session-${id}`, 'unrelated'])
+  const agentCalls = []
+  const agents = { get: () => ({ status: 'running', cancel: () => agentCalls.push('cancel'), whenIdle: async () => {} }) }
+
+  const result = await deleteSession({ sessionsRoot: sessions, agents, workspaceRegistry: registry, projectionCache: cache, isLive: () => false }, id)
+
+  assert.equal(result.ghost, true)
+  assert.deepEqual(result.removed, [], '没有目录可删')
+  assert.deepEqual(result.dirs, [])
+  assert.equal(result.detached, true)
+  assert.equal(result.wasLive, false)
+  assert.deepEqual([...state.sessionIds], ['other'], '★ 记账里只少了它')
+  assert.equal(state.archived.size, 0, '★ 归档集合里的幽灵标记被清')
+  assert.equal(state.pinned.size, 0, '★ 置顶集合里的幽灵标记被清')
+  assert.deepEqual([...cache.store], ['unrelated'], '★ 投影缓存两种拼写都清')
+  assert.deepEqual(agentCalls, [], '不停 agent')
+  assert.deepEqual(snapshotSessionDirs(sessions), seeded, '别的会话目录一个都不少')
+  assert.deepEqual(calls.sort(), [`detach:${id}`, `unarchive:${id}`, `unpin:${id}`].sort())
+})
+
+test('幽灵会话：记账里是带前缀的拼写、请求用裸拼写时，用记账里那一种去解除', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const id = 'ghost0000-0000-0000-0000-000000000002'
+  const { registry, state, calls } = fakeGhostRegistry({ sessionIds: [`session-${id}`] })
+
+  const result = await deleteSession({ sessionsRoot: sessions, workspaceRegistry: registry }, id)
+
+  assert.equal(result.ghost, true)
+  assert.deepEqual(calls, [`detach:session-${id}`])
+  assert.equal(state.sessionIds.size, 0)
+})
+
+test('只在归档集合里的幽灵标记（工作区列表里已经没有它）也算「记账里有」，被清掉', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const { registry, state } = fakeGhostRegistry({ archived: ['gone-1'] })
+
+  const result = await deleteSession({ sessionsRoot: sessions, workspaceRegistry: registry }, 'gone-1')
+
+  assert.equal(result.ghost, true)
+  assert.equal(result.workspace.unarchived, true)
+  assert.equal(state.archived.size, 0)
+})
+
+test('★ 目标活着但磁盘上还没有目录（刚开、日志没落盘的新会话）：仍是 TARGET_NOT_FOUND，记账原封不动', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const id = 'fresh000-0000-0000-0000-000000000003'
+  const { registry, state, calls } = fakeGhostRegistry({ sessionIds: [id], archived: [id], pinned: [id] })
+  const cache = fakeCacheTable([id])
+
+  // 两种拼写的活会话判断由调用方（路由的 findLiveSession）负责；deleteSession 只看它对目标 id 的回答。
+  await assert.rejects(
+    () => deleteSession({ sessionsRoot: sessions, workspaceRegistry: registry, projectionCache: cache, isLive: (target) => target === id }, id),
+    (error) => error.code === ERROR_CODES.targetNotFound,
+  )
+  assert.deepEqual(calls, [], '★ 活会话没有目录时不能动记账')
+  assert.deepEqual([...state.sessionIds], [id])
+  assert.equal(state.archived.size, 1)
+  assert.equal(state.pinned.size, 1)
+  assert.deepEqual([...cache.store], [id], '投影缓存也不动')
+})
+
+test('磁盘和记账里都没有：仍是 TARGET_NOT_FOUND，什么都不碰', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const { registry, state, calls } = fakeGhostRegistry({ sessionIds: ['other'], archived: ['other'] })
+  const cache = fakeCacheTable(['other', 'nowhere'])
+
+  await assert.rejects(
+    () => deleteSession({ sessionsRoot: sessions, workspaceRegistry: registry, projectionCache: cache }, 'nowhere'),
+    (error) => error.code === ERROR_CODES.targetNotFound,
+  )
+  assert.deepEqual(calls, [])
+  assert.deepEqual([...state.sessionIds], ['other'])
+  assert.deepEqual([...cache.store].sort(), ['nowhere', 'other'], '连缓存里同名的记录也不动：没确认是幽灵就什么都不做')
+
+  // 没有注册表（terminal-only）同理。
+  await assert.rejects(
+    () => deleteSession({ sessionsRoot: sessions }, 'nowhere'),
+    (error) => error.code === ERROR_CODES.targetNotFound,
+  )
+})
+
+test('磁盘上还留着以它为父的子代理目录：不算幽灵，仍是 TARGET_NOT_FOUND，子代理目录不动', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const id = 'ghost0000-0000-0000-0000-000000000004'
+  const child = makeSessionWithHeader(sessions, '--D-work--', 'child-1', { id: 'child-1', origin: 'subagent', parentSession: `session-${id}` })
+  const { registry, state, calls } = fakeGhostRegistry({ sessionIds: [id] })
+
+  await assert.rejects(
+    () => deleteSession({ sessionsRoot: sessions, workspaceRegistry: registry }, id),
+    (error) => error.code === ERROR_CODES.targetNotFound,
+  )
+  assert.equal(existsSync(child), true)
+  assert.deepEqual(calls, [])
+  assert.equal(state.sessionIds.size, 1)
+})
+
+test('幽灵会话的记账清不掉（宿主抛错）：DELETE_FAILED，不假装成功，投影缓存也不动', async (t) => {
+  const sessions = workspaceSessionsRoot(t)
+  const id = 'ghost0000-0000-0000-0000-000000000005'
+  const { registry } = fakeGhostRegistry({ sessionIds: [id], detachFails: true })
+  const cache = fakeCacheTable([id])
+
+  await assert.rejects(
+    () => deleteSession({ sessionsRoot: sessions, workspaceRegistry: registry, projectionCache: cache }, id),
+    (error) => error.code === ERROR_CODES.deleteFailed && /记账表锁住了/.test(error.message),
+  )
+  assert.deepEqual([...cache.store], [id])
 })

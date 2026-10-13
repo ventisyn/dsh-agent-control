@@ -7,7 +7,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 269 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 279 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）、`AGENT_BUSY`（423，agent 停不下来）
@@ -95,7 +95,7 @@
 删除必须按**固定顺序**（顺序错了会留下孤儿目录或错误的记账）：
 
 ```
-校验 id → 确认磁盘上有目录（没有 → TARGET_NOT_FOUND，不产生任何副作用）
+校验 id → 确认磁盘上有目录（没有 → 通常 TARGET_NOT_FOUND，不产生任何副作用；唯一例外是下面的「幽灵会话」）
         → 找出子代理后代（读会话头：origin=subagent 且 parentSession 指向它，递归；fork 不算）
           （活着的后代不再拒绝，只在结果里登记 `liveDescendants`）
         → 停掉运行中的 agent（目标 + 后代；cancel + 等静默，有超时上限）
@@ -106,6 +106,12 @@
 
 目标「本次启动后打开过」（内存 store 里有记录）时，删除**之前**还要先做一件事——见下面「让那一行真的消失」。
 ```
+
+#### 幽灵会话：只剩工作区记账、磁盘上已经没有目录
+
+`listSessions` 会把只存在于工作区记账里的会话也列出来（`removable: true`），如果 `deleteSession` 一见没有目录就抛 `TARGET_NOT_FOUND`，这条记账永远清不掉。所以**三个条件同时满足**时走幽灵清理：① 磁盘上没有任何目录（含子代理后代，`findSubagentDescendants` 也没找到）；② 目标不活在本进程的 store 里（`isLive` 为假，路由层两种拼写都查）；③ 工作区记账里确实有这个 id（会话列表、归档集合或置顶集合，两种拼写都认；id 形状必须合法）。清理只动工作区记账（含归档 / 置顶集合）与投影缓存，**不停 agent、不删任何目录**，结果里 `ghost: true`、`removed` 为空数组；记账一条都没清成且有失败时抛 `DELETE_FAILED`，不假装成功。
+
+边界必须保住：**目标活着但磁盘上还没有目录**（刚开、日志还没落盘的新会话）仍是 `TARGET_NOT_FOUND`，一个字都不动；磁盘与记账都没有它同样是 `TARGET_NOT_FOUND`。路由层对幽灵返回 200 与 `ghost: true`，并照常发 `api-session/removed`。
 
 #### 让那一行真的消失：借归档当「临时遮盖」，启动时再收掉
 
@@ -451,11 +457,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**269 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
+- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**279 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
 - ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（70）、`node test/client.test.mjs`（65）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（33），合计同样是 **269 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（73）、`node test/client.test.mjs`（65）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（40），合计同样是 **279 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
 - ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
