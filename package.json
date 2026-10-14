@@ -8,6 +8,9 @@
   "exports": {
     ".": "./src/index.mjs",
     "./client": "./client.js",
+    "./session": "./src/session-plugin.mjs",
+    "./turn": "./src/turn-plugin.mjs",
+    "./restart": "./src/restart-plugin.mjs",
     "./package.json": "./package.json"
   },
   "files": [
@@ -21,7 +24,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --check src/index.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
+    "test": "node --check src/index.mjs && node --check src/host-wiring.mjs && node --check src/session-plugin.mjs && node --check src/turn-plugin.mjs && node --check src/restart-plugin.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/features.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
     "log:inspect": "node test/log-inspect.mjs"
   },
   "keywords": [
