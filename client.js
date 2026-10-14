@@ -24,6 +24,26 @@
     // 见 docs/VERIFY-0.2.1-alpha.1-v1.1.0.md 6.10）。与 src/shared.mjs 的 PATHS 逐字一致。
     shutdown: '/api/agent-control/shutdown',
   }
+  /**
+   * 各组件的**只读**可用性探针（与 host 的 `FEATURES` 逐字一致，见 src/shared.mjs）。
+   *
+   * 挂载（apply）时各拉一次：只有 2xx 且 `ok: true` 才算「这个组件在本进程里装着」。
+   * 组件被关掉时那条路由根本不存在（404 / 落宿主的鉴权 fallback），于是这里拿不到，
+   * 客户端就不注册对应的槽位入口——**判据必须在注册之前**（已经注册的槽位无法在运行中卸载）。
+   */
+  const FEATURE_PROBES = {
+    session: '/api/agent-control/session/status',
+    turn: '/api/agent-control/turn/status',
+    // 热重启复用已有的状态接口（它本来就是辅助进程的就绪探针），不再多开一条路由。
+    restart: '/api/agent-control/restart/status',
+  }
+  /**
+   * 探测的超时上限。
+   *
+   * 超时按「不可用」处理：**判据的方向要选安全的那一侧**——宁可少显示一个按钮，也不要在组件
+   * 已经关掉之后留下一个点了报错的按钮。探针是同源只读 GET，正常在毫秒级返回。
+   */
+  const FEATURE_PROBE_TIMEOUT_MS = 3000
   const LOCALE_NS = 'agent-control'
   /** 自定义事件：按钮只派发目标，弹窗统一监听。 */
   const REQUEST_EVENT = 'dsh-agent-control:request-delete'
@@ -789,6 +809,61 @@
   let sessionsService
 /** 客户端 cordis 上下文：留一份，让不接收 ctx 的辅助函数也能问 uiWorkspace / workspaces。 */
 let clientCtx
+
+  /**
+   * 这次探测到的组件开关：`true` / `false`，**还没探到是 `null`**（按「不可用」用）。
+   *
+   * 排障抓手 `window.__dshAgentControl.features()` 读的就是它的只读快照。
+   */
+  const featureAvailability = { session: null, turn: null, restart: null }
+  /** 三个探针的合集：只探一次，`apply` 与排障抓手读的是同一份结果。 */
+  let featureProbePromise
+
+  /** 这一次探测到的组件开关（只读快照，供排障；`null` = 还没探到）。 */
+  function featureSnapshot() {
+    return { ...featureAvailability }
+  }
+
+  /** 一个组件这次探测到可用吗（`null` 与 `false` 都算不可用）。 */
+  function isFeatureAvailable(feature) {
+    return featureAvailability[feature] === true
+  }
+
+  /**
+   * 探测各组件是否可用：每个探针各拉一次（同源只读 GET，不带凭据、不改任何状态）。
+   *
+   * 任何异常（网络错误、非 2xx、超时、响应不是 JSON）都记成不可用。结果缓存在
+   * `featureProbePromise` 里——`apply` 与排障抓手读的是同一次探测的结果。
+   *
+   * @returns {Promise<void>} 三个探针都落定（不会 reject）。
+   */
+  function probeFeatures() {
+    if (featureProbePromise !== undefined) return featureProbePromise
+    featureProbePromise = Promise.all(Object.entries(FEATURE_PROBES).map(async ([feature, url]) => {
+      let available = false
+      try {
+        const response = await fetchWithTimeout(url)
+        const payload = response.ok === true ? await response.json() : null
+        available = payload?.ok === true
+      } catch {
+        // 探测失败 = 这个组件不可用：**不重试、不报错**——它只是「这次没探到」。
+        available = false
+      }
+      featureAvailability[feature] = available
+    }))
+    return featureProbePromise
+  }
+
+  /** 带超时的 GET。超时/失败都往上抛，由 `probeFeatures` 记成「不可用」。 */
+  async function fetchWithTimeout(url) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), FEATURE_PROBE_TIMEOUT_MS)
+    try {
+      return await fetch(url, { method: 'GET', cache: 'no-store', signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
 
   /** 每个会话已删除的轮次：`sessionId -> Promise<number[] | null>`（读失败是 null，且不留在缓存里），避免每个标记各拉一次。 */
   const deletedTurnsCache = new Map()
@@ -2066,7 +2141,8 @@ let clientCtx
         window.addEventListener(RESTART_REQUEST_EVENT, onRestartRequest)
         window.addEventListener(SHUTDOWN_REQUEST_EVENT, onShutdownRequest)
         // 播种一次状态：模型发起的重启不需要用户先打开设置页就能被横幅看见。
-        if (!restartStatusSeeded) {
+        // 重启组件被关掉时不做这件事——那条路由根本不存在，拉它只是白跑。
+        if (isFeatureAvailable('restart') && !restartStatusSeeded) {
           restartStatusSeeded = true
           void pollRestartStatus({ force: true })
         }
@@ -2393,11 +2469,16 @@ let clientCtx
         )
       }
 
-      const banner = renderRestartBanner()
-      const shutdownBanner = renderShutdownBanner()
-      const restartConfirm = renderRestartConfirm()
-      const shutdownDialog = renderShutdownDialog()
-      const deleteConfirm = renderDeleteConfirm()
+      // 组件级开关：重启那一套（横幅 + 重启/关闭确认）只在「重启组件」可用时渲染；删除确认只在
+      // 会话或轮次组件至少有一个可用时渲染。槽位层面已经按同一个判据注册过（见 registerSlots），
+      // 这里是同一判据的第二道：事件被人用别的方式派发时也不会冒出点不通的界面。
+      const restartAvailable = isFeatureAvailable('restart')
+      const deleteAvailable = isFeatureAvailable('session') || isFeatureAvailable('turn')
+      const banner = restartAvailable ? renderRestartBanner() : null
+      const shutdownBanner = restartAvailable ? renderShutdownBanner() : null
+      const restartConfirm = restartAvailable ? renderRestartConfirm() : null
+      const shutdownDialog = restartAvailable ? renderShutdownDialog() : null
+      const deleteConfirm = deleteAvailable ? renderDeleteConfirm() : null
       // 什么都没有时返回 null：槽位在「没事发生」时不该往页面上放节点。
       if (banner === null && shutdownBanner === null && restartConfirm === null
         && shutdownDialog === null && deleteConfirm === null) return null
@@ -2898,7 +2979,16 @@ let clientCtx
     }
   }
 
-  function apply(ctx) {
+  /**
+   * 挂载：**先探测各组件是否可用，再按结果注册槽位**。
+   *
+   * 顺序是硬要求：槽位一旦注册就无法在运行中卸载，所以判据必须在注册之前拿到。探测失败/超时的
+   * 方向是安全的那一侧——宁可不显示，也不要在组件已经关掉之后留下一个点了报错的按钮
+   * （模型侧本来也有 host 闸门，少显示只是界面滞后）。
+   *
+   * 返回 Promise（宿主会等它）：探测完成前一个槽位都不注册。
+   */
+  async function apply(ctx) {
     adoptLocale(ctx)
     clientCtx = ctx
     sessionsService = ctx.get('sessions')
@@ -2908,44 +2998,69 @@ let clientCtx
       })
     }
 
-    const ui = components(React)
+    await probeFeatures()
+    registerSlots(ctx, components(React))
+  }
 
-    ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
-      name: 'sidebar.workspaces.session.menu.item',
-      id: ENTRY.sessionMenu,
-      // 原生项是 100 置顶 / 200 重命名 / 300 分叉 / 400 归档；破坏性操作排在最后。
-      order: 500,
-    }, ui.SessionMenuDelete))
+  /**
+   * 按这次探测到的组件开关注册槽位。
+   *
+   * 关掉哪个组件就不注册哪些槽位——界面上不会留下它的入口：
+   *   - 会话 → 会话行「…」菜单里的删除项；
+   *   - 轮次 → 回复旁的垃圾桶按钮 + 已删轮次的隐藏标记；
+   *   - 重启 → 设置页那一节（横幅与重启/关闭确认框在弹窗宿主内部再按同一个判据过滤）。
+   * 弹窗宿主（`shell.overlay`）只有一个、三个用途共用它，所以只要有**任意**一个组件可用就注册它，
+   * 具体渲染哪几个用途在组件内部按 `isFeatureAvailable` 决定。
+   *
+   * @param {any} ctx - cordis 上下文。
+   * @param {any} ui - `components(React)` 的结果。
+   * @returns {void}
+   */
+  function registerSlots(ctx, ui) {
+    if (isFeatureAvailable('session')) {
+      ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+        name: 'sidebar.workspaces.session.menu.item',
+        id: ENTRY.sessionMenu,
+        // 原生项是 100 置顶 / 200 重命名 / 300 分叉 / 400 归档；破坏性操作排在最后。
+        order: 500,
+      }, ui.SessionMenuDelete))
+    }
 
-    ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
-      name: 'conversation.chat.assistant-actions',
-      id: ENTRY.turnButton,
-      order: 90,
-      inject: (sessionId) => ({ sessionId }),
-    }, ui.TurnDeleteAction))
+    if (isFeatureAvailable('turn')) {
+      ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
+        name: 'conversation.chat.assistant-actions',
+        id: ENTRY.turnButton,
+        order: 90,
+        inject: (sessionId) => ({ sessionId }),
+      }, ui.TurnDeleteAction))
 
-    ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
-      name: 'conversation.chat.turnTail',
-      id: ENTRY.turnMarker,
-      order: 90,
-      inject: (sessionId) => ({ sessionId }),
-    }, ui.DeletedTurnMarker))
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail',
+        id: ENTRY.turnMarker,
+        order: 90,
+        inject: (sessionId) => ({ sessionId }),
+      }, ui.DeletedTurnMarker))
+    }
 
-    ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-      name: 'shell.overlay',
-      id: ENTRY.dialog,
-      order: 100,
-    }, ui.OverlayDialogs))
+    if (isFeatureAvailable('session') || isFeatureAvailable('turn') || isFeatureAvailable('restart')) {
+      ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+        name: 'shell.overlay',
+        id: ENTRY.dialog,
+        order: 100,
+      }, ui.OverlayDialogs))
+    }
 
-    // 设置页「热重启」。原生页签是 account -10 / general 0 / models 10 / plugins 15 /
-    // agent-presets 20；本插件是附加页，排在最后。`label` 用 thunk 跟着语言走（宿主每次
-    // 投影都会重新读它，见 dsh-client-ui-slots 的 resolveSlotLabel），不需要重新注册。
-    ctx.slots.inject('settings.section', () => ctx.slots.register({
-      name: 'settings.section',
-      id: ENTRY.restartSection,
-      order: 500,
-      label: () => restartSectionLabel(),
-    }, ui.RestartSection))
+    if (isFeatureAvailable('restart')) {
+      // 设置页「热重启」。原生页签是 account -10 / general 0 / models 10 / plugins 15 /
+      // agent-presets 20；本插件是附加页，排在最后。`label` 用 thunk 跟着语言走（宿主每次
+      // 投影都会重新读它，见 dsh-client-ui-slots 的 resolveSlotLabel），不需要重新注册。
+      ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section',
+        id: ENTRY.restartSection,
+        order: 500,
+        label: () => restartSectionLabel(),
+      }, ui.RestartSection))
+    }
   }
 
   /** 接入 locale 服务并注册词典；失败就退回内置文案，功能不受影响。 */
@@ -3014,6 +3129,12 @@ let clientCtx
       : RiskConfirmation !== FallbackRiskConfirmation,
     /** 主按钮这次用的是原生 `Button` 还是自带兜底（排障与测试都靠它）。 */
     usingNativeButton: () => Button !== undefined,
+    /**
+     * 这次挂载探测到的组件开关（只读快照）：`{ session, turn, restart }`，每个是
+     * `true` / `false` / `null`（`null` = 还没探到，按不可用处理）。
+     * 排障用：界面上少了一个入口时，先看这里是不是 `false`。
+     */
+    features: featureSnapshot,
     restart: {
       phases: RESTART_PHASES,
       constants: {

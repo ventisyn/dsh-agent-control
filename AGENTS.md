@@ -7,7 +7,7 @@
 
 > ✅ **轮次删除已恢复（`0.2.0-rc.2-v1.0.0` 起，`0.2.1-alpha.1-v1.0.1` 沿用）**：改用与内核**手动压缩同形**的事务（`compaction/start` → `compaction/summary` → `compact-checkpoint` 替换 → `compaction/end`，`turn: null`），见 3.2。v1.0.0 的 `system/message` 墓碑会让会话**重启后打不开**（坑 ⑪），已不再写入。新写法已用 DSH 的**真实** v4 加载校验器在本机全部 60 个会话上逐轮模拟验证：244 次删除全部通过，旧写法对照组全部失败（`test/v4-load-check.mjs`）；**真机闭环也已走通**：删一轮 → 重启 `dsh web` → 打开会话正常加载、继续对话正常、模型确认看不到被删内容（`docs/VERIFY-0.2.0-rc.2-v1.0.0.md` 第 8 节）。
 >
-> ⚠️ **现状：离线测试 291 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项）。** 实测结论：
+> ⚠️ **现状：离线测试 307 项通过（v1.0.0 真机复验时是 51 项，v1.0.1 是 84 项，v1.2.0 是 291 项）。** 实测结论：
 >
 > - **删一轮**（完整链路）：墓碑以 `provider: dsh-agent-control` 落盘（`seq=41 turn=2 range=26..28`，`id` 是字符串）。~~带墓碑的日志被真内核完整重放~~——**错误结论**，重启后打开会话即「历史加载失败」（坑 ⑪）；删会话验证到磁盘/记账无残留，但**投影缓存 `session_projcache/sessions/<id>.json` 在本轮开发分支实测中残留**（见 3.3）
 > - **拒绝路径**：`TARGET_NOT_FOUND`（404）、参数校验含路径穿越（400）、错误方法（405）、`AGENT_BUSY`（423，agent 停不下来）
@@ -40,7 +40,11 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `src/index.mjs` | host 端插件入口：`apply` / `inject` / `name`，注册 HTTP 路由与生命周期，只做接线，不写业务 |
+| `src/index.mjs` | host 端插件入口（core 行）：`apply` / `inject` / `name`，启动清理 `pruneOrphanArchives()`，以及「按行构建各功能」的接线——某个组件有自己那一行时让开，没有时才代装（3.10） |
+| `src/host-wiring.mjs` | **三个组件的唯一接线实现**：`applySessionFeature` / `applyTurnFeature` / `applyRestartFeature`、只读探针、组件认领表与「自己那一行」判定（`hasOwnRow`）；路由注册、错误映射、可信校验都只在这里有一份 |
+| `src/session-plugin.mjs` | `agent-control-session` 行的入口：只装会话组件（`config.enabled: false` 时直接返回） |
+| `src/turn-plugin.mjs` | `agent-control-turn` 行的入口：只装轮次组件（同上） |
+| `src/restart-plugin.mjs` | `agent-control-restart` 行的入口：只装热重启组件（同上） |
 | `src/session-delete.mjs` | 会话删除：定位磁盘目录、停 agent、清工作区记账、确认删净（不 import cordis，可用假对象单测） |
 | `src/turn-delete.mjs` | 轮次删除：算轮次区间、算 surface 区间、追加删除事务（压缩同形四件套）、认识新旧两种删除记录 |
 | `src/restart.mjs` | **热重启的纯逻辑**：阻塞项计算、限频、启动规格（argv 重放）构造、`pending.json`/`last.json` 读写与过期判断（不 import cordis，可离线单测） |
@@ -48,12 +52,12 @@
 | `src/restart-tool.mjs` | **热重启与关闭实例的接线**：`restart_harness` 工具定义 + 唯一入口 `requestRestart`（守卫、审批、单飞、退出时序），以及 `requestShutdown`（只判定 + 返回退出动作，**没有模型工具**）；工具与 HTTP 路由共用它们 |
 | `src/shared.mjs` | host 与 client 共用的常量与纯工具（路由路径、错误码、id 校验、轮次括号） |
 | `client.js` | 浏览器端 bundle，经 `window.__ModuleLoader__.load({ id: 'dsh-agent-control', factory })` 注册 |
-| `test/*.test.mjs` | 离线测试（`npm test` 的主体），六个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线、热重启纯逻辑、热重启辅助进程（`host.test.mjs`：HTTP 状态映射与活会话闸门） |
+| `test/*.test.mjs` | 离线测试（`npm test` 的主体），七个文件分别覆盖轮次删除、会话删除、客户端 bundle、host 接线、热重启纯逻辑、热重启辅助进程、组件级开关（`host.test.mjs`：HTTP 状态映射与活会话闸门；`features.test.mjs`：四行的路由清单、零重复注册、`enabled: false`、patch 与 exports 的一致性） |
 | `test/log-inspect.mjs` | **只读**会话日志诊断器（3.6）：解压 `session.v4.jsonl.zstd`、列墓碑、独立复刻 surface 代数、打印「磁盘 vs 模型可见」对照。**故意不叫 `*.test.mjs`** —— 它没有测试项，命名成测试文件会白白抬高 `node --test` 的计数、让「196 项」这个对照基准漂移。它是**取证工具**，用法与两个必知的实现细节见第 9 节 |
 | `test/fake-session.mjs` | 假内核：复刻 append 时的 surface 校验规则，让区间算错在离线阶段就失败 |
 | `test/v4-load-check.mjs` | 用 DSH 安装目录里**真实的** v4 加载校验器检查会话日志，并在内存里逐轮模拟删除（坑 ⑪ 的防线）。依赖本机 DSH 安装，**不进** `npm test` |
-| `package.json` | `main` / `exports`（`.` 与 `./client`）、`dsh.bundle.patch`、`dsh.client.platform = web` |
-| `cordis.patch.yml` | bundle patch：`insert` 插件行（id `agent-control`） |
+| `package.json` | `main` / `exports`（`.`、`./client`、三个组件子路径 `./session` `./turn` `./restart`）、`dsh.bundle.patch`、`dsh.client.platform = web` |
+| `cordis.patch.yml` | bundle patch：`insert` 四行插件（core 行 id `agent-control` + 三个组件行 `agent-control-session` / `-turn` / `-restart`；**主行的 id / name 不要改名**，否则升级时 profile 里的行会失配） |
 | `docs/` | `VERIFY-0.2.0-rc.2-v1.0.0.md` 与 `VERIFY-0.2.1-alpha.1-v1.0.1.md`（均已落地，含未验证项清单）；`GUIDE.md`、`screenshots/` 未落地 |
 
 拆成 `src/*.mjs` 而不是姊妹项目那样的单文件，是因为**核心逻辑必须能离线单测**：轮次删除是一段容易算错的区间代数，只有把纯逻辑与 cordis 接线分开，才能在 `npm test` 里覆盖（第 5、9 节）。
@@ -242,8 +246,12 @@ GET  /api/agent-control/turns?sessionId=       # { ok, sessionId, turns: number[
                                                # ⚠️ 只在**活动会话**上可读：读取走 ctx.sessions.get(id)，重启后没被打开过的会话
                                                # 返回 TARGET_NOT_FOUND（与「本来就没有删除记录」同码）。答案本身是持久的：
                                                # 打开会话后与重启前逐字一致（VERIFY 第 10 节）
+GET  /api/agent-control/session/status         # { ok: true, enabled: true } ——「会话」组件的**只读可用性探针**
+                                               # 客户端在挂载时各拉一次，探不到（404 / 鉴权 fallback）就不注册对应的界面入口（3.10）
+                                               # 只读、无参数、不改状态，所以不加可信校验
 POST /api/agent-control/session/delete         # { sessionId }
 POST /api/agent-control/turn/delete            # { sessionId, assistantMessageId }
+GET  /api/agent-control/turn/status            # 「轮次」组件的只读探针（同上）
 GET  /api/agent-control/restart/status         # { ok, bootId, pid, startedAt, port, canRestart, unsupportedReason?,
                                                #   blockers: { sessions: [...], jobs: number }, pending, last }
                                                # 热重启：**同时是辅助进程的就绪探针**，所以它必须允许无凭据访问；
@@ -295,7 +303,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 - **host 端不 import 任何 `@deepseek-ai/*` 包**，只用 Node 内置模块与 `ctx` 上的服务。（v1.0.0 曾在 `src/tombstone.mjs` 懒加载 `@deepseek-ai/dsh-llm`，实测从插件位置**解析不到**、一直走兜底；删除事务改为自己构造消息后，这个文件已删除。）
 - **客户端 `require` 解构出来的每个东西都要假定可能不存在**：`require('@deepseek-ai/dsh-client-ui-primitives')` 包在 try/catch 里，拿不到就退回自带的内联 SVG 垃圾桶与确认框（**仍然要求显式勾选**）。这类问题在别处真实发生过：一个不存在的图标名就让组件渲染抛错（第 4 节坑 ③）。
 
-排障抓手：浏览器控制台里 `window.__dshAgentControl.usingNativePrimitives()` 告诉你这次用的是原生原语还是兜底；`window.__dshAgentControl.apply` 是注册函数本体。
+排障抓手：浏览器控制台里 `window.__dshAgentControl.usingNativePrimitives()` 告诉你这次用的是原生原语还是兜底；`window.__dshAgentControl.features()` 给出这次挂载探测到的组件开关（`true` / `false` / `null`，见 3.10）；`window.__dshAgentControl.apply` 是注册函数本体。
 
 ### 3.8 数据与运行环境（已实现）
 
@@ -359,6 +367,51 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 - ⚠️ **这一秒买的是「人眼看得见」**：延迟定在 1000 ms，不是「够把响应刷出去」的 300 ms。真机反馈过一次——300 ms 时进程已经没了，浏览器来得及收到 202、却来不及把「正在关闭」画清楚，用户看到的是「点了没反应，然后页面死了」。**反馈必须出现在弹窗里**（它 portal 到 body，是唯一一定盖得住设置面板的表面）：`closing` / `closed` 要各有自己的呈现，**不许退回普通确认框的样子**——曾经就是这样，用户以为没生效。
 - **幂等**：退出窗口内的第二次 `POST /shutdown` 得到 409（不会再排一次退出）；关闭进行中调 `requestRestart` 也是 409，反之亦然。
 - `appExit` 不存在 ⇒ 501；`exit` 抛错 ⇒ 复原标记 + `SHUTDOWN_FAILED`，**绝不假装已经关掉**。
+
+### 3.10 组件级开关（四行结构）
+
+插件列表里本插件下有**四行**：core（`agent-control`）+ 三个组件行（`agent-control-session` /
+`-turn` / `-restart`）。每一行是 `cordis.patch.yml` 的 `insert:` 里一个 entry；右侧的开关调用宿主的
+`pluginManager/setPluginEnabled(entryId, enabled)`：宿主把那一行标成 `disabled` 写进 **profile 的 patch**，
+**重启实例后**生效。
+
+**关键：被禁用的行，loader 根本不会调用它的 `apply`。**（`cordis-plugin-loader` 的 `Entry.update`：
+`if (this.disabled) { this.fiber?.dispose(); return }`；`Entry.disabled` 连祖先组一起算。）所以「关掉一个组件」
+= 那一行的接线从来不执行，而不是「装上了再关」——这也意味着：**主入口不能无条件把三个组件都装上**，
+否则关掉子行完全不起作用（路由还在、界面照样显示入口）。
+
+于是「谁负责注册」只有一条规则：
+
+| 情形 | 谁装 |
+| --- | --- |
+| loader 的行树里有 `dsh-agent-control/<组件>` 这一行 | **那一行**（开着：它自己装；被关掉：谁都不装） |
+| 没有那一行（例如只有一行 `agent-control` 的旧 profile） | **主入口**（行为与从前完全一致） |
+
+实现要点：
+
+- 判定在 `hasOwnRow(ctx, feature)`（`src/host-wiring.mjs`）：`ctx.get('loader')` → `loader.entries()` →
+  `entry.options.name`。判据是**行存不存在**，不看它开没开（开着的行自己会装；关掉的行走不到 `apply`）。
+  **拿不到 loader 服务时返回 false**（= 照旧全装）：这是保守的一侧——查不到行的信息不该让全部功能消失。
+  - 为什么这条判定及时：patch 是**一次性**合并成一个 entry 列表再 `root.update(...)` 的
+    （`dsh-app-boot` 的 `applyEntryPatches` → `EntryGroup.update`，四个 entry 在同一个 tick 里进入 loader 的
+    `store`），所以主入口 apply 时兄弟们已经在树上了。
+- 三个组件的接线**只有一份实现**（`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` /
+  `applyRestartFeature`）：主入口与三个子插件行调用的是同一份，子插件各自只调用自己那一个。
+- **认领表**（`claimFeature`）挡住同一进程里的重复注册：`webServer.register` 对同一个 `(kind, path)`
+  会抛错，工具也不该注册两次。先到先得、后到的跳过（只在 debug / info 级留一行线索），认领在
+  `ctx.effect` 的清理里释放，所以热重载后还能注册回去。离线测试用
+  `resetFeatureClaimsForTest()` 清它（假 ctx 的 `effect` 从不 dispose）。
+- 子插件行的 `apply(ctx, config)` 认 `config.enabled`：**只有明确的 `false`** 才算关（缺省 = 开），
+  这时直接返回——不注册路由、不注册工具、不订阅事件、也不抛错（关掉一个组件不该让实例起不来）。
+  两条路都通：宿主开关写行级 `disabled`（loader 不 apply），手写 `config.enabled: false`（apply 立刻返回）。
+- **客户端靠探针判断「组件在不在」**：每个组件在自己的路由命名空间下有一条只读探针
+  （`GET /api/agent-control/session/status`、`.../turn/status`；热重启复用已有的 `GET /restart/status`），
+  返回 `{ ok: true, enabled: true }`。客户端在挂载时各拉一次，**先探测、后注册**（槽位一旦注册就不能在
+  运行中卸载），探不到（404 / 鉴权 fallback / 超时）就不注册对应的槽位内容；方向是安全的那一侧——
+  宁可少显示一个按钮，也不留一个点了报错的按钮。排障抓手 `window.__dshAgentControl.features()`
+  给出这次探测到的开关（`true` / `false` / `null`）。
+- ⚠️ **别改主行的 id / name**（`agent-control` / `dsh-agent-control`）：宿主开关是按 id（+name）往 profile 的
+  patch 里写覆盖行的，改名会让升级后的旧行失配（第 4 节）。
 
 ## 4. 与 DSH 版本的耦合点 ⚠️
 
@@ -457,11 +510,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 ## 5. 开发环境
 
 - **无构建步骤、无运行时依赖**：`package.json` **既没有 `dependencies` 也没有 `peerDependencies`**，请保持。host 端只用 Node 内置模块；客户端只用 loader 注入的 `react`。
-- `npm test` = 先对**七个** `src/*.mjs`（`index` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的九个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**291 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
+- `npm test` = 先对**十一个** `src/*.mjs`（`index` / `host-wiring` / `session-plugin` / `turn-plugin` / `restart-plugin` / `shared` / `session-delete` / `turn-delete` / `restart` / `restart-helper` / `restart-tool`）与 `client.js`、`test/` 下的十个 `.mjs` 逐个 `node --check`，再跑 `node --test "test/**/*.test.mjs"`（**307 项**）。**离线测试不碰真实 profile**：会话删除的文件操作全部在 `os.tmpdir()` 里的临时目录，用完即清；热重启与关闭实例的测试一律注入假的 spawn/appExit，**绝不真的派生进程或退出**。
 - `npm run log:inspect -- <会话 id>` = 跑会话日志诊断器（3.6）。它**不是测试**，不出现在 `npm test` 里。
-- ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，六个测试文件全 ✖、`pass 0 fail 6`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
+- ⚠️ **沙箱下 `npm test` 会「假失败」**：`node --test` 默认**要为每个测试文件 spawn 一个子进程并走管道**，受限沙箱里直接报 `Error: spawn EPERM`，七个测试文件全 ✖、`pass 0 fail 7`，看起来像测试坏了——**那是沙箱边界，不是测试失败**。两个办法：
   1. 用更宽的权限跑一次（第 9 节第 1 步）；
-  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（81）、`node test/client.test.mjs`（69）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（40），合计同样是 **291 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
+  2. **不 spawn 地跑**：逐个直接执行 `node test/restart.test.mjs`（54）、`node test/restart-helper.test.mjs`（22）、`node test/host.test.mjs`（81）、`node test/client.test.mjs`（71）、`node test/features.test.mjs`（14）、`node test/turn-delete.test.mjs`（25）、`node test/session-delete.test.mjs`（40），合计同样是 **307 项全绿**。（这个数字随测试增减而变：改了 `test/` 就把本节开头的总数、这里的逐文件数字与 `README` 的「开发」一节一起更新，别让它腐烂。）
   Node 还需要在系统临时目录建目录（写桩模块、建临时会话树），受限时也会以 `EPERM`/`Access is denied` 失败。
 - ⚠️ **沙箱下 `process.env.TEMP` / `os.tmpdir()` 指向的是沙箱私有临时目录**，与实例进程看到的真实临时目录**不是同一个**。写诊断脚本时不要靠 `tmpdir()` 去找另一个进程写的文件（本机实测踩过），要显式给出真实路径。
 - ⚠️ **不要用 `(Get-Content x) -replace … | Set-Content x -NoNewline` 批量改文本**：PowerShell 会把数组元素**不带分隔符**地拼在一起，整个文件被压成一行（本机刚踩过：三个 markdown 文件因此报废，只能从 git 恢复）。改文件用编辑工具，或在管道里显式 `-join "\`n"` 并保留结尾换行。
@@ -621,6 +674,23 @@ chore: bump version to 0.2.0-rc.2-v1.0.1
 ```
 
 首个版本没有上一条版本分支：`git init` 后直接在 `0.2.0-rc.2-v1.0.0/dev` 上开发，验收后按第四步改名发布。
+
+### 第零步：先开 dev 分支，再动任何文件（**踩过一次**）
+
+**规则：本轮的第一条命令是 `git checkout -b <目标完整版本号>/dev`，不是改代码。** 在版本分支上写代码再补开 dev，等于让「未发布的东西」先落在已发布的命名空间里；改得越多，事后越难分辨哪些属于这一轮。
+
+**2026-10-14 真实踩到**：做「组件级单独开关」时直接在已发布的版本分支上开发，一路写到离线测试全绿、真机实测跑完，到最后要开 dev 才发现工作区已经堆了 14 个文件的改动。事后补救（改动尚未提交时）：
+
+```sh
+git checkout -b <目标完整版本号>/dev     # 从当前 HEAD 开分支；工作区/索引不动，改动原样跟过来
+```
+
+原因：`git checkout -b` 不清理工作区，未提交的改动会带到新分支上。**所以这次没造成损失，但这是运气，不是流程。**
+
+补救之后还要做两件事，顺序不能反：
+
+1. **版本号提交要干净**：`package.json` 里往往同时躺着「版本号」与「本轮功能的其它改动」（`exports`、`scripts` 等）。先 `git reset` 清索引，再把版本行改回旧值 → `git add package.json` → 把新版本号写回工作区，这样「start」那条提交里**只有版本号一行**（实测：不这么做会把功能改动一起提交进去，得 `git reset --soft HEAD~1` 重做）。
+2. **确认没有未合并的提交**：`git branch --no-merged <上一条版本分支>` 必须为空。**若不为空、说明上一轮的东西漏合了，先报告，不要继续发布流程。**
 
 ### 第一步：先评估目标版本号
 

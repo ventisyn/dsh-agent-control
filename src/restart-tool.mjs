@@ -189,7 +189,7 @@ export function createRestartState(ctx, options = {}) {
     execPath: typeof process.execPath === 'string' ? process.execPath : '',
     cwd: process.cwd(),
     env: process.env,
-    approvalMode: resolveApprovalMode(options.config),
+    approvalMode: resolveApprovalMode(options.config, options.fallbackConfig),
     now: typeof options.now === 'function' ? options.now : () => Date.now(),
     // 后台时序必须**不在工具调用栈里**跑：setTimeout(0) 把控制权先还给工具层，
     // 让工具结果先落盘、这一轮先结束（计划 2.1 第 3–4 步）。
@@ -237,12 +237,20 @@ export function createRestartState(ctx, options = {}) {
  *
  * 未知值一律回退 `ask`：配置写错一个词就变成「免审批重启」是不可接受的，宁可多问一次。
  *
- * @param {{ approval?: unknown } | undefined} config - 插件行的 `config:`。
+ * **审批策略配在哪一行**：组件化之后「热重启」有自己的行（`agent-control-restart`），而
+ * `approval` 历史上写在主行（`agent-control`）上。所以先看**拥有这个组件的那一行**，它没写时
+ * 回退到主行的配置——否则把组件拆出去之后，用户在旧配置里写的 `approval: auto` 会被静默忽略、
+ * 又变回每次都要审批（配置漂移，且不报错）。
+ *
+ * @param {{ approval?: unknown } | undefined} config - 拥有这个组件的那一行的 `config:`。
+ * @param {{ approval?: unknown } | undefined} [fallbackConfig] - 主行的 `config:`（回退）。
  * @returns {'ask' | 'auto'} 生效的策略。
  */
-export function resolveApprovalMode(config) {
+export function resolveApprovalMode(config, fallbackConfig) {
   const value = config?.approval
   if (value === 'auto' || value === 'ask') return value
+  const fallback = fallbackConfig?.approval
+  if (fallback === 'auto' || fallback === 'ask') return fallback
   return DEFAULT_APPROVAL_MODE
 }
 

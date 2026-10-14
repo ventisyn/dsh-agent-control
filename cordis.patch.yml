@@ -6,3 +6,18 @@
       # （见 docs/PLAN-hot-restart.md 3.4）。界面上的重启按钮不走审批：点按钮本身就是授权。
       config:
         approval: ask
+
+    # 三个组件各占一行：插件列表里可以逐个开关（关掉 = 这一行被写成 `disabled: true`，
+    # loader 不会 apply 它）。主入口只在「这个组件没有自己那一行」时才代装，所以关掉一行
+    # 真的会让路由消失、界面入口也随之消失（见 src/host-wiring.mjs 的 hasOwnRow）。
+    # ⚠️ 不要把主行的 id / name 改名：升级时 profile 里那条同 id 的行会失配。
+    - id: agent-control-session
+      name: dsh-agent-control/session
+    - id: agent-control-turn
+      name: dsh-agent-control/turn
+    - id: agent-control-restart
+      name: dsh-agent-control/restart
+      # 模型发起的重启是否过一次审批：`ask`（缺省，走 DSH 审批卡片）| `auto`（免审批）。
+      # 与主行同义：这一行自己写了就以它为准，没写则回退主行那一份（旧配置写在主行上）。
+      config:
+        approval: ask

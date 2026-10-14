@@ -9,6 +9,9 @@ DeepSeek Harness（DSH）插件：把三件会改变实例现状的**破坏性�
   - ⚠️ v1.0.0 的旧写法（空的 `system/message` 墓碑）会让会话**重启后打不开**，已不再使用。
 - **热重启**：把「DSH 进程重启」这件事也收进同一个插件——模型可以调用 `restart_harness`（必须说明原因）让需要重启才生效的改动（例如宿主插件代码）落地，**重启后这个会话自动继续**；用户也可以在设置页点按钮重启。见下方「热重启」一节。
 
+**插件列表里四行、可以逐个开关**（core + 会话 / 轮次 / 热重启三个组件）：关掉哪一行，那一个组件
+就真的下线——路由消失、界面入口随之消失。见下方「组件开关」。
+
 本插件只使用 DSH 的公开 API：不依赖内核的私有结构，也不照抄任何第三方插件的实现。这一点是刻意的——依赖私有结构的写法换一个 harness 版本就会静默失效（详见 `AGENTS.md` 第 4 节）。
 
 ## 两者的区别（最要紧的一条）
@@ -29,6 +32,38 @@ DeepSeek Harness（DSH）插件：把三件会改变实例现状的**破坏性�
 - 两者都会弹出**同一个确认框**，必须**勾选确认**才能点「删除」
 - 删掉的那一轮会在界面上被隐藏，让界面与模型看到的保持一致
 - **设置 → Agent 控制** → 运行状态、阻塞提示、「重启 DSH」按钮与「最近一次重启」卡片，外加一个「关闭实例」按钮（见下）
+
+## 组件开关
+
+本插件在插件列表里是**四行**（一行 core + 三个组件行），每一行都可以单独关掉。关掉之后那个组件
+在本进程里**根本不存在**：路由消失、界面上的入口也跟着消失——不是「按钮还在、点了报错」。
+
+| 行 | 负责什么 |
+| --- | --- |
+| `dsh-agent-control`（core） | 客户端 bundle 的交付、启动时清理孤儿归档标记，以及「按行构建各功能」的接线。它本身**不含**删除或重启能力 |
+| `dsh-agent-control/session`（会话） | 会话列表、删除会话（含只剩记账的「幽灵会话」清理），以及客户端判断这个组件在不在的只读探针 |
+| `dsh-agent-control/turn`（轮次） | 某个会话里已删轮次的列表、删除一轮，以及只读探针 |
+| `dsh-agent-control/restart`（热重启） | 重启状态 / 重启 / 关闭实例三条路由、模型工具 `restart_harness`、重启后的「续作投递」 |
+
+**怎么关**：插件列表里本插件那一组「包含的组件」右侧的开关。关掉是一次 profile 写入
+（宿主把那一行标成 disabled），**重启实例后生效**——host 端的接线只在进程启动时装配。
+
+**关掉之后的实际影响**：
+
+- **路由真的不见了**：被关掉的组件那几条路由（含只读探针）在进程里根本不存在，请求会落到 404
+  或宿主的鉴权 fallback。`GET /api/agent-control/sessions` 这类探针可以直接用来确认。
+- **界面入口跟着消失**：客户端在挂载时先探测这几个组件（`GET /api/agent-control/session/status`、
+  `.../turn/status`、`.../restart/status`，都是只读、不带参数、不改变状态的接口），探不到就不注册
+  对应的槽位——会话行菜单里的删除项、回复旁的垃圾桶、已删轮次的隐藏标记、设置页那一节、重启/关闭横幅与确认框。
+  判据是「**先探测、后注册**」（已经注册的槽位无法在运行中卸载），探测失败或超时的方向是**少显示**
+  （模型侧本来也有 host 闸门，少显示只是界面滞后）。
+- **旧配置不受影响**：如果某个组件行从来不存在（例如只有一行 `agent-control` 的老配置），core 会把
+  三个组件全装上，行为与从前完全一致。
+- **关掉不删数据、也不改变已知残留**：插件自己不落任何数据文件；会话删除在内存 store 里那条记录
+  （已知残留，见「已知限制」）仍然要等进程退出才消失——关掉组件既不会撤销已经发生的删除，也不会顺手清残留。
+- **关掉「热重启」= 重启与关闭都下线**：`restart_harness` 工具、设置页那一节、界面上的重启按钮与
+  **关闭实例**按钮属于同一个组件，要留着它们就别关这一行。
+- **关掉一个组件不会让实例起不来**（刻意的：配置写错一个词的代价不该是打不开）。
 
 ## 热重启与关闭实例
 
@@ -106,19 +141,26 @@ curl http://127.0.0.1:<端口>/api/agent-control/restart/status
 ```js
 window.__dshAgentControl.usingNativePrimitives()  // 用的是原生原语还是自带兜底
 window.__dshAgentControl.id                       // 注册 id
+window.__dshAgentControl.features()               // 这次挂载探测到的组件开关：{ session, turn, restart }
+                                                  // true / false / null（null = 还没探到，按不可用处理）
 ```
 
 接口一览：
 
 ```
+GET  /api/agent-control/session/status    { ok: true, enabled: true } ←「会话」组件的只读探针（界面靠它决定注册不注册入口）
 GET  /api/agent-control/sessions          会话列表
 GET  /api/agent-control/turns?sessionId=  某个会话里已被删除的轮次
 POST /api/agent-control/session/delete    { sessionId }
 POST /api/agent-control/turn/delete       { sessionId, assistantMessageId }
-GET  /api/agent-control/restart/status    热重启的状态（也是新进程的就绪探针）
+GET  /api/agent-control/turn/status       「轮次」组件的只读探针（同上）
+GET  /api/agent-control/restart/status    热重启的状态（也是新进程的就绪探针，同时是「重启」组件的只读探针）
 POST /api/agent-control/restart           { reason?, force? } → 202 { ok, restartId }
 POST /api/agent-control/shutdown          { }（可空体）→ 202 { ok } ← 停掉整个实例，只从界面触发
 ```
+
+**组件被关掉时，属于它的那几条路由根本不存在**（请求落到 404 或宿主的鉴权 fallback），
+所以「这个组件在不在」用上面那几条 `/status` 探针一拉就知道。
 
 失败一律返回 `{ ok: false, error: { code, message } }`。错误码含义：
 
@@ -143,7 +185,7 @@ POST /api/agent-control/shutdown          { }（可空体）→ 202 { ok } ← �
 ## 开发
 
 ```sh
-npm test    # 语法检查 + 291 项离线测试，不需要 DSH 进程，也不碰真实 profile
+npm test    # 语法检查 + 307 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
 设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)。

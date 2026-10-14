@@ -8,6 +8,9 @@
  *     整个 bundle 直接加载失败；
  *  3. 槽位注册形状不对（list 槽位缺 `id`），注册静默无效。
  *
+ * ⚠️ `apply` 是 **async** 的：它要先把各组件可用性探针拉完才注册槽位（先探测、后注册——
+ * 已经注册的槽位无法在运行中卸载）。所以每个用例都要 `await` 它，否则会看到「一个都没注册」。
+ *
  * 这里**真的执行 client.js**：桩掉 `window` 与 `MutationObserver`，`react` 用一个
  * 会记账的替身——每个组件都被实际调用一次，所以「组件里引用了不存在的东西」
  * 会当场抛出来。
@@ -342,8 +345,8 @@ test('factory 只 require 声明过的模块，且用到的导出名都取到了
   ])
 })
 
-test('apply 注册五个槽位，且每个 list 槽位都带 id', () => {
-  loaded.apply(makeContext())
+test('apply 注册五个槽位，且每个 list 槽位都带 id', async () => {
+  await loaded.apply(makeContext())
 
   assert.deepEqual(slotInjections.sort(), [
     'conversation.chat.assistant-actions',
@@ -365,8 +368,8 @@ test('apply 注册五个槽位，且每个 list 槽位都带 id', () => {
   assert.equal(registrations.some((entry) => 'select' in entry.options), false)
 })
 
-test('两个轮次相关槽位都把 sessionId 注入给组件', () => {
-  loaded.apply(makeContext())
+test('两个轮次相关槽位都把 sessionId 注入给组件', async () => {
+  await loaded.apply(makeContext())
 
   for (const name of ['conversation.chat.assistant-actions', 'conversation.chat.turnTail']) {
     const entry = registrations.find((item) => item.name === name)
@@ -375,8 +378,8 @@ test('两个轮次相关槽位都把 sessionId 注入给组件', () => {
   }
 })
 
-test('槽位条目 id 唯一且带插件前缀', () => {
-  loaded.apply(makeContext())
+test('槽位条目 id 唯一且带插件前缀', async () => {
+  await loaded.apply(makeContext())
   const ids = registrations.map((entry) => entry.options.id)
   assert.equal(new Set(ids).size, ids.length, '条目 id 必须唯一')
   for (const id of ids) assert.match(id, /^agent-control-/, '条目 id 统一带插件前缀，便于排查冲突')
@@ -446,8 +449,8 @@ function findElement(node, predicate) {
   return undefined
 }
 
-test('每个组件都能被构造出来（不依赖模块初始化阶段的 hooks）', () => {
-  loaded.apply(makeContext())
+test('每个组件都能被构造出来（不依赖模块初始化阶段的 hooks）', async () => {
+  await loaded.apply(makeContext())
 
   const props = {
     sessionId: 'session-1',
@@ -471,9 +474,9 @@ test('每个组件都能被构造出来（不依赖模块初始化阶段的 hook
   }
 })
 
-test('弹窗监听删除请求事件，且在还没有目标时不渲染', () => {
+test('弹窗监听删除请求事件，且在还没有目标时不渲染', async () => {
   const context = makeContext()
-  loaded.apply(context)
+  await loaded.apply(context)
 
   // 监听必须在渲染之前装好，组件挂载时才收得到。
   const listeners = []
@@ -491,8 +494,8 @@ test('弹窗监听删除请求事件，且在还没有目标时不渲染', () =>
   assert.equal(typeof lastCleanup, 'function', '监听必须在卸载时清理掉')
 })
 
-test('会话菜单项点击会派发删除请求，带上 sessionId 与标题', () => {
-  loaded.apply(makeContext())
+test('会话菜单项点击会派发删除请求，带上 sessionId 与标题', async () => {
+  await loaded.apply(makeContext())
 
   dispatched.length = 0
   const entry = registrations.find((item) => item.name === 'sidebar.workspaces.session.menu.item')
@@ -516,14 +519,14 @@ test('会话菜单项点击会派发删除请求，带上 sessionId 与标题', 
   })
 })
 
-test('删除项排在原生归档项（order 400）之后', () => {
-  loaded.apply(makeContext())
+test('删除项排在原生归档项（order 400）之后', async () => {
+  await loaded.apply(makeContext())
   const entry = registrations.find((item) => item.name === 'sidebar.workspaces.session.menu.item')
   assert.ok(entry.options.order > 400, '原生项是 100 置顶 / 200 重命名 / 300 分叉 / 400 归档')
 })
 
-test('运行中的 assistant 按钮禁用且不派发请求', () => {
-  loaded.apply(makeContext())
+test('运行中的 assistant 按钮禁用且不派发请求', async () => {
+  await loaded.apply(makeContext())
 
   dispatched.length = 0
   const entry = registrations.find((item) => item.name === 'conversation.chat.assistant-actions')
@@ -966,7 +969,7 @@ function makeRefNode() {
 test('删除成功后弹窗会广播 turns-changed（否则标记不会重新判断）', async () => {
   // 真机现象：删除成功后界面还显示着那一轮，刷新页面才对。
   // 根因是只清了缓存却没有广播——没有任何组件会因此重跑。
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
 
   // 1) 先把监听器接管过来，**再**碰任何组件。
   //    顺序很重要：测试里渲染组件必须让假 React 知道「现在在渲染谁」，
@@ -979,7 +982,7 @@ test('删除成功后弹窗会广播 turns-changed（否则标记不会重新判
   globalThis.window.removeEventListener = () => {}
   globalThis.window.dispatchEvent = (event) => dispatchedEvents.push(event)
 
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const dialog = registrations.find((entry) => entry.name === 'shell.overlay')
 
   // 2) 挂载弹窗 → 捕捉 request-delete 监听器
@@ -1011,7 +1014,7 @@ test('删除成功后弹窗会广播 turns-changed（否则标记不会重新判
 })
 
 test('标记收到广播后重新判断，把刚删的那一轮隐藏掉', async () => {
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   await flush()
 
   const { row, anchor } = makeRefNode()
@@ -1063,7 +1066,7 @@ test('标记收到广播后重新判断，把刚删的那一轮隐藏掉', async
  * 调用前要先接管 window.addEventListener（listeners 由调用方提供）。
  */
 async function mountMarker(listeners, anchor, sessionId, turn = 7) {
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const before = listeners.length
   refRegistry.onNext = (ref) => {
     ref.current = anchor
@@ -1279,14 +1282,14 @@ test('重读已删轮次时请求失败：已经藏好的行保持隐藏，不�
   assert.equal(row.hidden, true)
 })
 
-test('轮次删除弹窗里指认目标的那一句也走词表（英文界面不能冒出中文）', (t) => {
+test('轮次删除弹窗里指认目标的那一句也走词表（英文界面不能冒出中文）', async (t) => {
   // describeTarget 曾把「选中的这条回复」写死在代码里，词表里没有对应的键。
   const browser = captureBrowser(t, () => okTurns([]))
   const originalNavigator = globalThis.navigator
   t.after(() => {
     Object.defineProperty(globalThis, 'navigator', { value: originalNavigator, configurable: true, writable: true })
   })
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const dialog = registrations.find((entry) => entry.name === 'shell.overlay')
 
   /** 渲染一次轮次删除确认框，返回正文。 */
@@ -1354,7 +1357,7 @@ function captureReload(t) {
  */
 async function mountSessionDeleteDialog(t, respond, sessionId = 'session-77', services = {}, options = {}) {
   const browser = captureBrowser(t, respond)
-  loaded.apply(makeContext(services, options))
+  await loaded.apply(makeContext(services, options))
   const dialog = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(dialog.component, { t: (key) => key })
   const onRequest = browser.listeners
@@ -1664,8 +1667,8 @@ function broadcastRestartChanged(listeners) {
   for (const handler of handlers) handler({ detail: restartApi().snapshot() })
 }
 
-test('设置页注册成 settings.section（list 槽位：id 必填、order 排在原生页之后、label 是 thunk）', () => {
-  loaded.apply(makeContext())
+test('设置页注册成 settings.section（list 槽位：id 必填、order 排在原生页之后、label 是 thunk）', async () => {
+  await loaded.apply(makeContext())
   const entry = registrations.find((item) => item.name === 'settings.section')
   assert.ok(entry, '必须注册设置页槽位')
   assert.equal(entry.options.id, 'agent-control-restart', '槽位 id 用独立的一格，绝不顶掉原生页')
@@ -1875,7 +1878,7 @@ test('重启设置页：画出运行状态、阻塞项、危险态主按钮与�
     },
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const section = registrations.find((entry) => entry.name === 'settings.section')
 
   // 首帧：状态还没回来也必须画得出来（不能整页空白），并给一句「正在读取」
@@ -1918,7 +1921,7 @@ test('宿主说不能重启时：主按钮禁用，并原样显示它给出的�
     unsupportedReason: '取不到启动规格：拿不到 dsh 的入口脚本',
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const section = registrations.find((entry) => entry.name === 'settings.section')
   renderComponent(section.component, {})
   await restartApi().poll({ force: true })
@@ -1936,7 +1939,7 @@ test('宿主说不能重启时：主按钮禁用，并原样显示它给出的�
 test('主按钮只派发 request-restart，确认框由同一个 overlay 宿主渲染（不新开槽位）', async (t) => {
   const browser = captureBrowser(t, () => okPayload({ ok: true, bootId: 'boot-a', pid: 1, pending: null }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   assert.equal(
     registrations.filter((entry) => entry.name === 'shell.overlay').length,
     1,
@@ -2002,7 +2005,7 @@ test('提交被拒：宿主的原因留在弹窗里，阶段退回确认态（�
     })
   })
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, { t: (key) => key })
   await restartApi().poll({ force: true })
@@ -2034,7 +2037,7 @@ test('提交时网络就不通：说「重启请求没有发出去」，不能�
     throw new Error('Failed to fetch')
   })
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   // 不传 t：走插件自己的词表（中文），断言的才是用户真看到的文案。
   renderComponent(overlay.component, {})
@@ -2062,7 +2065,7 @@ test('重启横幅：非阻塞卡片在重启期间显示，bootId 一变就收�
   const reload = captureReload(t)
   const browser = captureBrowser(t, () => okPayload({ ok: true, bootId: 'boot-old', pid: 100, pending: null }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, { t: (key) => key })
   // 先让页面认下旧进程（否则第一次读到的 bootId 会被当成「就是它」）
@@ -2107,7 +2110,7 @@ test('超时失败：横幅给失败态与手动刷新入口（刷新只由用�
     throw new Error('ECONNREFUSED')
   })
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, { t: (key) => key })
   restartApi().dispatch({ type: 'confirm' })
@@ -2191,7 +2194,7 @@ test('整段 bundle 在拿不到原生原语时仍然加载得起来，主按钮
     await import(url)
     assert.equal(typeof fallbackApply, 'function', '拿不到原生原语也必须加载得起来')
 
-    fallbackApply(makeContext())
+    await fallbackApply(makeContext())
     const section = registrations.find((entry) => entry.name === 'settings.section')
     assert.ok(section, '设置页照常注册')
     const tree = renderComponent(section.component, {})
@@ -2308,7 +2311,7 @@ test('设置页新增「关闭实例」行：就在「重启 DSH」下面，同�
     blockers: { sessions: [], jobs: 0 },
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const section = registrations.find((entry) => entry.name === 'settings.section')
 
   // 首帧（状态还没回来）就该画出来：读不到 canShutdown 时不预先禁用，让宿主裁决。
@@ -2359,7 +2362,7 @@ test('宿主说关不掉时：关闭按钮禁用，并原样显示它给出的�
     ...answer,
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const section = registrations.find((entry) => entry.name === 'settings.section')
   renderComponent(section.component, {})
   await restartApi().poll({ force: true })
@@ -2397,7 +2400,7 @@ test('关闭按钮只派发 request-shutdown，确认框由同一个 overlay 宿
     blockers: { sessions: [{ sessionId: 'session-1', title: '正在跑长任务的会话', descendant: true }], jobs: 2 },
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   assert.equal(
     registrations.filter((entry) => entry.name === 'shell.overlay').length,
     1,
@@ -2543,7 +2546,7 @@ test('关闭被接受后立刻进 closing：横幅说明、状态请求失败不
     throw new Error('ECONNREFUSED')
   })
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, {})
   const onShutdownRequest = browser.listeners
@@ -2664,7 +2667,7 @@ test('关闭被拒：宿主的原因留在弹窗里，阶段退回确认态（�
     })
   })
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, {})
   await restartApi().poll({ force: true })
@@ -2701,7 +2704,7 @@ test('关不掉（请求一直没有回应）：弹窗给「重试」与「关�
     return okPayload({ ok: true })
   })
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, {})
   const onShutdownRequest = browser.listeners
@@ -2763,7 +2766,7 @@ test('两个按钮互斥：任一流程占着界面时，另一个按钮禁用',
     canShutdown: true,
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const section = registrations.find((entry) => entry.name === 'settings.section')
   renderComponent(section.component, {})
   await restartApi().poll({ force: true })
@@ -2821,7 +2824,7 @@ test('拿不到原生原语时关闭行照常工作：两个危险按钮都退�
     const url = `${pathToFileURL(path.join(process.cwd(), 'client.js')).href}?no-primitives-shutdown`
     await import(url)
     assert.equal(typeof fallbackApply, 'function', '拿不到原生原语也必须加载得起来')
-    fallbackApply(makeContext())
+    await fallbackApply(makeContext())
     const section = registrations.find((entry) => entry.name === 'settings.section')
     const tree = renderComponent(section.component, {})
 
@@ -2885,7 +2888,7 @@ test('关闭弹窗三种形状：确认型要勾选，requested / closing 是信
     blockers: { sessions: [], jobs: 0 },
   }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, {})
   const onShutdownRequest = browser.listeners
@@ -2967,7 +2970,7 @@ test('关闭弹窗三种形状：确认型要勾选，requested / closing 是信
 test('关闭落定（closed）：模态说「实例已关闭，可以关掉这个页面」，只有一个「知道了」能收掉它', async (t) => {
   const browser = captureBrowser(t, () => okPayload({ ok: true, bootId: 'boot-a', pid: 1, canShutdown: true }))
   restartApi().reset()
-  loaded.apply(makeContext())
+  await loaded.apply(makeContext())
   const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
   renderComponent(overlay.component, {})
   for (const event of [
@@ -3023,7 +3026,7 @@ test('原生 Modal 拿不到时，信息型模态仍然退回自带的整页覆�
     const url = `${pathToFileURL(path.join(process.cwd(), 'client.js')).href}?no-primitives-info`
     await import(url)
     assert.equal(typeof fallbackApply, 'function', '拿不到原生原语也必须加载得起来')
-    fallbackApply(makeContext())
+    await fallbackApply(makeContext())
 
     // 推进到 closing：这个 bundle 副本有自己的模块级态机（抓手也换成了它自己的）。
     const api = restartApi()
@@ -3064,3 +3067,93 @@ test('原生 Modal 拿不到时，信息型模态仍然退回自带的整页覆�
   }
 })
 
+
+// ---------------------------------------------------------------------------
+// 组件级开关：客户端在挂载时探测各组件是否可用，再决定注册哪些槽位
+//
+// 「关掉一个组件」在 host 上是「那条路由根本不存在」，所以客户端唯一的判据就是探针。
+// 方向上选的是**安全的那一侧**：探不到就不显示入口，而不是留一个点了报错的按钮。
+// 这两个用例各自重新加载一份 bundle（探针结果按模块实例缓存，必须用新实例）。
+// ---------------------------------------------------------------------------
+
+/** 把 bundle 重新加载一份（新的模块实例 = 新的探针状态），返回它的 apply。 */
+async function loadBundleCopy(tag, fetchImpl) {
+  const originalLoader = globalThis.window.__ModuleLoader__
+  const originalExpose = globalThis.window.__dshAgentControl
+  const originalFetch = globalThis.fetch
+  let probeApply
+  globalThis.window.__ModuleLoader__ = {
+    load(spec) {
+      probeApply = spec.factory(makeRequire()).apply
+    },
+  }
+  globalThis.fetch = fetchImpl
+  await import(`${pathToFileURL(path.join(process.cwd(), 'client.js')).href}?${tag}`)
+  return {
+    apply: probeApply,
+    restore() {
+      globalThis.window.__ModuleLoader__ = originalLoader
+      globalThis.fetch = originalFetch
+      globalThis.window.__dshAgentControl = originalExpose
+    },
+  }
+}
+
+test('组件探针：只关掉重启时，设置页不注册、重启界面不渲染，排障抓手如实报告', async () => {
+  const probed = []
+  const copy = await loadBundleCopy('probe-restart-off', async (url) => {
+    probed.push(String(url))
+    // 关掉的组件把那一条路由整个摘掉 ⇒ 探针 404（这里模拟的就是它）。
+    if (String(url).includes('/restart/status')) {
+      return { ok: false, status: 404, json: async () => ({ ok: false, error: { code: 'TARGET_NOT_FOUND' } }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, enabled: true }) }
+  })
+  try {
+    await copy.apply(makeContext())
+
+    assert.deepEqual(probed.sort(), [
+      '/api/agent-control/restart/status',
+      '/api/agent-control/session/status',
+      '/api/agent-control/turn/status',
+    ], '三个组件各探一次（同源只读 GET）')
+    assert.deepEqual(slotInjections.sort(), [
+      'conversation.chat.assistant-actions',
+      'conversation.chat.turnTail',
+      'shell.overlay',
+      'sidebar.workspaces.session.menu.item',
+    ], '★ 关掉重启就不该注册设置页')
+    assert.equal(registrations.some((entry) => entry.name === 'settings.section'), false)
+    assert.deepEqual(globalThis.window.__dshAgentControl.features(), {
+      session: true,
+      turn: true,
+      restart: false,
+    }, '排障抓手要如实报告这次探测到的开关')
+
+    // 弹窗宿主里不再有重启/关闭那一套：剩下的删除用途没有目标时什么都不渲染。
+    const overlay = registrations.find((entry) => entry.name === 'shell.overlay')
+    assert.ok(overlay, '只要还有组件可用，弹窗宿主就得在')
+    assert.equal(renderComponent(overlay.component, {}), null, '★ 重启界面不该再冒出来')
+  } finally {
+    copy.restore()
+  }
+})
+
+test('组件探针：全部探不到（网络错误）时一个槽位都不注册，方向是「少显示」', async () => {
+  const copy = await loadBundleCopy('probe-all-off', async () => {
+    throw new Error('探针请求失败')
+  })
+  try {
+    await copy.apply(makeContext())
+
+    assert.deepEqual(slotInjections, [], '★ 一个组件都探不到时不该注册任何槽位')
+    assert.deepEqual(registrations, [])
+    assert.deepEqual(globalThis.window.__dshAgentControl.features(), {
+      session: false,
+      turn: false,
+      restart: false,
+    })
+  } finally {
+    copy.restore()
+  }
+})

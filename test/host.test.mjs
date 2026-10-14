@@ -30,6 +30,7 @@ import {
   resetRestartRuntimeForTest,
   resolveApprovalMode,
 } from '../src/restart-tool.mjs'
+import { resetFeatureClaimsForTest } from '../src/host-wiring.mjs'
 import { threeTurnSession } from './fake-session.mjs'
 
 const { apply, pruneOrphanArchives } = await import('../src/index.mjs')
@@ -56,6 +57,9 @@ function makeSessionDir(home, dirName) {
 
 /** 假 ctx：记下注册的路由与 error 日志。`options.host` 用来注入重启时序的假副作用。 */
 function makeHost(services = {}, options = {}) {
+  // 每个用例都是一次「新进程」：组件认领表是进程级的（生产里它挡住主入口与子插件行的重复注册），
+  // 而假 ctx 的 `effect` 从不 dispose，所以这里显式清一次。
+  resetFeatureClaimsForTest()
   const routes = new Map()
   const errors = []
   const warnings = []
@@ -1573,6 +1577,14 @@ test('审批策略配置手工校验：只认 ask / auto，未知值回退 ask',
   assert.equal(resolveApprovalMode({ approval: 'ask' }), 'ask')
   assert.equal(resolveApprovalMode({ approval: 'never' }), 'ask', '写错的词不能让重启变成免审批')
   assert.equal(resolveApprovalMode({ approval: true }), 'ask')
+  // 组件拆行之后：热重启有了自己那一行，而旧配置写在主行上。子行没写时要回退到主行那份，
+  // 否则用户升级后 `approval: auto` 会被静默忽略、每次重启都弹审批（配置漂移且不报错）。
+  assert.equal(resolveApprovalMode(undefined, { approval: 'auto' }), 'auto', '自己没写 → 回退主行')
+  assert.equal(resolveApprovalMode({}, { approval: 'auto' }), 'auto')
+  assert.equal(resolveApprovalMode({ approval: 'ask' }, { approval: 'auto' }), 'ask', '自己写了就以自己为准')
+  assert.equal(resolveApprovalMode({ approval: 'auto' }, { approval: 'ask' }), 'auto')
+  assert.equal(resolveApprovalMode({ approval: 'never' }, { approval: 'auto' }), 'auto', '自己写坏了 → 回退主行那份')
+  assert.equal(resolveApprovalMode(undefined, { approval: 'never' }), 'ask', '两边都写坏 → 缺省 ask')
 })
 
 test('启动参数重放：--port 0（OS 随机端口）时把真实端口原地钉住，别让新进程换端口', () => {

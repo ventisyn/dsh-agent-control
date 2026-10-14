@@ -14,8 +14,13 @@ export const API_PREFIX = '/api/agent-control'
 export const PATHS = {
   sessions: `${API_PREFIX}/sessions`,
   sessionDelete: `${API_PREFIX}/session/delete`,
+  // 组件级只读探针：客户端在挂载时各拉一次，拿到 200 + `ok` 才注册对应的界面入口。
+  // 组件关掉时这条路由根本不存在（404 / 落宿主的鉴权 fallback），客户端于是不注册入口——
+  // 界面不会留下一个点了报错的按钮（见 client.js 的 probeFeatures）。
+  sessionStatus: `${API_PREFIX}/session/status`,
   turns: `${API_PREFIX}/turns`,
   turnDelete: `${API_PREFIX}/turn/delete`,
+  turnStatus: `${API_PREFIX}/turn/status`,
   // 热重启（见 docs/PLAN-hot-restart.md 3.2）。status 是新进程的「就绪探针」，
   // 辅助进程靠它判断新进程是否已经起来了。
   restartStatus: `${API_PREFIX}/restart/status`,
@@ -27,6 +32,21 @@ export const PATHS = {
   // 模型可见的工具名。client 侧也有一份同名常量（浏览器 bundle 与 host 模块不共享模块图），
   // 两边的值必须一致。
   restartToolName: 'restart_harness',
+}
+
+/**
+ * 三个可以**单独开关**的组件：插件列表里各占一行（`cordis.patch.yml` 的 `insert:`），
+ * 关掉某一行 = 关掉这个组件（那一行的 `apply` 也不会被调用）。
+ *
+ * `plugin` 是那一行的模块名（`name:`），主入口靠它在 loader 里认出「这个组件有没有自己那一行」
+ * （见 host-wiring.mjs 的 `hasOwnRow`）；`probe` 是这个组件的只读可用性探针，客户端在挂载时各拉一次。
+ * 热重启复用已有的 `GET /restart/status`（它本来就是辅助进程的就绪探针，只读、不改变状态），
+ * 所以不再多开一条路由。
+ */
+export const FEATURES = {
+  session: { plugin: `${PLUGIN_NAME}/session`, probe: `${API_PREFIX}/session/status` },
+  turn: { plugin: `${PLUGIN_NAME}/turn`, probe: `${API_PREFIX}/turn/status` },
+  restart: { plugin: `${PLUGIN_NAME}/restart`, probe: `${API_PREFIX}/restart/status` },
 }
 
 /**
