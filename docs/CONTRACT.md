@@ -1,11 +1,8 @@
-# CONTRACT — 路由、事件、服务与边界（细则）
+# CONTRACT：路由、事件、服务与边界（细则）
 
-> 本文件是 [AGENTS.md](AGENTS.md) 第 3 节的**展开版**：AGENTS.md 只留每节的契约要点与不变量，
-> 全文（路由表原文、事件形状、实测数字、加载期约束）在这里。实现或改动这些面时逐条对照本文件。
->
-> 内容按 2026-10-15 的原样搬移（只改了标题层级），**没有改写结论**。
+[AGENTS.md](AGENTS.md) 第 3 节是每节的要点与不变量，本文件是它们的原文：路由表、事件形状、服务边界、实测数字、加载期约束。改这些面时逐条对照。本文件内容按 2026-10-15 从 AGENTS.md 原样搬移，只改了标题层级。
 
-## 1. HTTP 接口（3.5 全文）
+## 1. HTTP 接口（AGENTS.md 3.5）
 
 ```
 GET  /api/agent-control/sessions               # { ok, sessions: [{ sessionId, workspaceTitle, cwd, running, live, removable, reasons }] }（workspaceTitle 是工作区名，不是会话标题）
@@ -43,7 +40,7 @@ POST /api/agent-control/shutdown               # { }（可空体）→ 202 { ok 
 **路由注册必须把 disposer 返回出去**（`ctx.effect(() => ctx.webServer.register({...}))`）：`register` 对重复 `(kind, path)` 会抛错；如果注册写成返回 `undefined` 的箭头函数，注销就完全靠 fiber 卸载——重复 `apply` 会撞上（第 4 节）。
 
 
-## 2. 会话日志诊断器（3.6 全文）
+## 2. 会话日志诊断器（AGENTS.md 3.6）
 
 轮次删除的正确性看不见摸不着（界面上少了几行而已），所以**不要靠感觉判断**。`test/log-inspect.mjs`
 是只读诊断器，回答三个问题：
@@ -65,7 +62,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 看起来像日志空了，见第 9 节第 6 步）；它**只读**，不写文件、不碰 profile。
 
 
-## 3. 加载期的命脉：别让一个 import 弄死整个插件（3.7 全文）
+## 3. 加载期：别让一个 import 弄死整个插件（AGENTS.md 3.7）
 
 本插件运行在**别人的进程**里，裸模块（`@deepseek-ai/*`）能不能解析取决于宿主 loader。顶层静态 import 一旦解析失败，**整个插件消失**：host 模块加载失败 → 所有路由 404 → 界面上什么都不出现。因此：
 
@@ -75,7 +72,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 排障抓手：浏览器控制台里 `window.__dshAgentControl.usingNativePrimitives()` 告诉你这次用的是原生原语还是兜底；`window.__dshAgentControl.features()` 给出这次挂载探测到的组件开关（`true` / `false` / `null`，见 3.10）；`window.__dshAgentControl.apply` 是注册函数本体。
 
 
-## 4. 数据与运行环境（3.8 全文）
+## 4. 数据与运行环境（AGENTS.md 3.8）
 
 **这个插件自己不落任何数据文件**：没有配置、没有审计日志、没有缓存。唯一的持久事实是它写进会话日志的**墓碑**，那份数据归会话自己所有。删除操作的可观测性靠 harness 日志与接口响应，不要为了「看着专业」造一份本地流水。
 
@@ -95,7 +92,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 **客户端这一面本文件写得最薄，是刻意的**：槽位种类、owner props、`ClientSessions` 的真实成员、可用图标名，全都要在**活页面上**核对（`cordis_inspect_query` 的 `Slots.listSubTree`、浏览器控制台、primitives 的导出名单）。本文件里凡是没标「已核对 / 已实测」的客户端说法，都只当线索，不要当契约。
 
 
-## 5. 热重启与关闭实例（3.9 全文）
+## 5. 热重启与关闭实例（AGENTS.md 3.9）
 
 **动机**：DSH 没有内置重启，而 host 端模块不会热加载（坑 ⑦）——改了宿主插件就必须重启进程，而重启会打断正在做的事。热重启把这件事收进同一个插件：**模型可以请求重启并在重启后自动继续**，用户也可以在设置页点一次（`docs/adr/0001-hot-restart-via-detached-helper.md` 记了为什么是「脱离式辅助进程」）。
 
@@ -140,7 +137,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 - `appExit` 不存在 ⇒ 501；`exit` 抛错 ⇒ 复原标记 + `SHUTDOWN_FAILED`，**绝不假装已经关掉**。
 
 
-## 6. 组件级开关（3.10 全文）
+## 6. 组件级开关（AGENTS.md 3.10）
 
 插件列表里本插件下有**四行**：core（`agent-control`）+ 三个组件行（`agent-control-session` /
 `-turn` / `-restart`）。每一行是 `cordis.patch.yml` 的 `insert:` 里一个 entry；右侧的开关调用宿主的
@@ -185,7 +182,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 - ⚠️ **别改主行的 id / name**（`agent-control` / `dsh-agent-control`）：宿主开关是按 id（+name）往 profile 的
   patch 里写覆盖行的，改名会让升级后的旧行失配（第 4 节）。
 
-## 7. 本地联调与 profile 装/摘
+## 7. 本地联调与 profile 装/摘（AGENTS.md 第 5 节）
 
 ### 装进 profile 验证
 
