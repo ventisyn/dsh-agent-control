@@ -140,7 +140,7 @@ export function computeSurface(events) {
   return { visible: new Set(nodes), replacements, malformed };
 }
 
-/** 墓碑的形状核对 —— 每一条都对应真机踩过的坑（AGENTS.md 第 4 节 ①⑧） */
+/** 墓碑的形状核对 —— 每一条都对应真机踩过的坑（坑 ①⑧，见 docs/PITFALLS.md） */
 export function checkTombstoneShape(event) {
   const message = event?.data?.message ?? {};
   const op = event?.surfaceOp;

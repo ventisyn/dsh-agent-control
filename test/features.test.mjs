@@ -403,7 +403,7 @@ test('cordis.patch.yml：四行的 id 唯一、name 能在 package.json 的 expo
   assert.equal(new Set(rows.map((row) => row.id)).size, 4, '行 id 必须唯一')
   assert.equal(new Set(rows.map((row) => row.name)).size, 4, '行 name 必须唯一')
 
-  // 主行不许改名：升级时 profile 里那条同 id 的行会失配（见 AGENTS.md 第 4 节）。
+  // 主行不许改名：升级时 profile 里那条同 id 的行会失配（见 AGENTS.md 3.10）。
   assert.equal(rows[0].name, 'dsh-agent-control')
   assert.equal(rows[0].config.approval, 'ask')
   assert.deepEqual(rows.slice(1).map((row) => row.name), [

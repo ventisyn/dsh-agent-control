@@ -7,7 +7,7 @@
  *
  * 假内核复刻了内核在 append 时的校验（surface 区间、压缩事务不变量）与格式 v4 **加载时**的
  * 轮次/步骤规则（坑 ⑪），所以「写出一个当下合法、重启后打不开的日志」在这里就会失败。
- * 它仍然不是真内核：真机验证见 AGENTS.md 第 9 节与 `test/v4-load-check.mjs`。
+ * 它仍然不是真内核：真机验证见 AGENTS.md 第 9 节的自检清单与 `test/v4-load-check.mjs`。
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'

@@ -12,7 +12,7 @@ DeepSeek Harness（DSH）插件：把三件会改变实例现状的**破坏性�
 **插件列表里四行、可以逐个开关**（core + 会话 / 轮次 / 热重启三个组件）：关掉哪一行，那一个组件
 就真的下线——路由消失、界面入口随之消失。见下方「组件开关」。
 
-本插件只使用 DSH 的公开 API：不依赖内核的私有结构，也不照抄任何第三方插件的实现。这一点是刻意的——依赖私有结构的写法换一个 harness 版本就会静默失效（详见 `AGENTS.md` 第 4 节）。
+本插件只使用 DSH 的公开 API：不依赖内核的私有结构，也不照抄任何第三方插件的实现。这一点是刻意的——依赖私有结构的写法换一个 harness 版本就会静默失效（详见 [AGENTS.md](AGENTS.md) 第 4 节）。
 
 ## 两者的区别（最要紧的一条）
 
@@ -188,14 +188,15 @@ POST /api/agent-control/shutdown          { }（可空体）→ 202 { ok } ← �
 npm test    # 语法检查 + 307 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
-设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)。
+设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)；
+路由与事件细则在 [docs/CONTRACT.md](docs/CONTRACT.md)，已经踩过的坑在 [docs/PITFALLS.md](docs/PITFALLS.md)。
 
 ## 说明
 
 - **非官方**：这是第三方插件，与 DeepSeek 官方没有隶属或背书关系；文中出现的 DeepSeek、DeepSeek Harness、DSH 等名称仅用于说明它在什么环境里运行。
 - **主要由 AI 编码代理编写**：代码、测试与文档都是在与 AI 代理协作下产出的，提交历史里能直接看到。仓库里所有结论都尽量附上可复核的证据（日志、接口响应、诊断脚本输出），请**按证据判断**，不要按措辞判断。
 - 本插件的实测记录（包括**未验证项**）都写在仓库内 `docs/VERIFY-*.md` 里，请按那里的结论判断它的成熟度，不要只看本页的概览。
-- 与 harness 版本的耦合点、改完的自检清单、以及踩过的坑都在 [AGENTS.md](AGENTS.md)。
+- 细则与坑在 `docs/` 下：[CONTRACT.md](docs/CONTRACT.md)（路由与事件）、[PITFALLS.md](docs/PITFALLS.md)、[RELEASING.md](docs/RELEASING.md)。
 
 ## 许可
 

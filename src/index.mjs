@@ -17,7 +17,7 @@
  *
  * 业务逻辑在 `./session-delete.mjs` / `./turn-delete.mjs` / `./restart*.mjs`（纯逻辑，可离线单测）；
  * 路由与错误映射在 `./host-wiring.mjs`（三个组件各一份）。**host 端不 import 任何
- * `@deepseek-ai/*`**：顶层 import 解析失败会让整个插件消失（AGENTS.md 3.7）。
+ * `@deepseek-ai/*`**：顶层 import 解析失败会让整个插件消失（AGENTS.md 3.7，细则见 docs/CONTRACT.md 第 3 节）。
  */
 import { PLUGIN_NAME, sessionDirNames } from './shared.mjs'
 import { listSessions } from './session-delete.mjs'

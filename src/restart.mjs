@@ -2,8 +2,8 @@
  * 热重启的纯逻辑：阻塞项计算、限频、启动规格构造、状态文件读写、续作消息拼装。
  *
  * 与 `src/session-delete.mjs` 一样，本文件**不 import cordis，也不 import 任何 `@deepseek-ai/*` 包**
- * （AGENTS.md 3.7）：只用 Node 内置模块与 `./shared.mjs`，全部外部能力由调用方注入，
- * 离线测试因此可以用假对象驱动真正的判定序列（AGENTS.md 第 6 节）。
+ * （AGENTS.md 3.7，细则 docs/CONTRACT.md 第 3 节）：只用 Node 内置模块与 `./shared.mjs`，全部外部能力由调用方注入，
+ * 离线测试因此可以用假对象驱动真正的判定序列（AGENTS.md 3.4）。
  *
  * 失败语义：**能判定的就判死，判不了的一律拒绝**。启动规格少一个字段、形状不对，一律抛
  * `ControlError`（带码），绝不返回半个对象、绝不假装重启可行（docs/PLAN-hot-restart.md 第 8 节）。
@@ -122,7 +122,7 @@ export function newBootId(now = Date.now()) {
  *   - 其他 running 的 agent 一律算阻塞；
  *   - `jobs` 里 `running` / `stopping` 的算阻塞，**owner 是调用者自己的也算**（重启同样会打断它）。
  *
- * 返回的 `title` 拿不到就是空串，**不编造**（AGENTS.md 坑 ⑨）；宁可少一行说明，
+ * 返回的 `title` 拿不到就是空串，**不编造**（坑 ⑨，见 docs/PITFALLS.md）；宁可少一行说明，
  * 也不能在给模型的文案里出现「未知」「?」这种假装有信息的占位。
  *
  * 两个 id 的两种磁盘拼写（`<uuid>` 与 `session-<uuid>`）都会被归一后比较，
@@ -589,7 +589,7 @@ export function writeLast(dir, record) {
  *
  * 首行是机器可读标记，正文全中文。这个函数跑在**新进程**里、读的是落盘的待办，
  * 所以它**不抛错**：字段缺了就写「未说明」「未知」「无」，绝不因为一条记录写坏而让续作流程炸掉，
- * 也绝不编造原因（AGENTS.md 坑 ⑨）。
+ * 也绝不编造原因（坑 ⑨，见 docs/PITFALLS.md）。
  *
  * @param {{ reason?: unknown, durationMs?: unknown, resumeNote?: unknown }} [input] - 待办里的字段。
  * @returns {string} 多行中文消息。
@@ -732,7 +732,7 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-/** 取一个非空字符串字段，拿不到就是空串（不编造，见 AGENTS.md 坑 ⑨）。 */
+/** 取一个非空字符串字段，拿不到就是空串（不编造，见 docs/PITFALLS.md 坑 ⑨）。 */
 function textOf(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : ''
 }

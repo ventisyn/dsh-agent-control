@@ -8,7 +8,7 @@
 /** 插件名：bundle patch 行 id、loader 注册 id、日志前缀都用它。 */
 export const PLUGIN_NAME = 'dsh-agent-control'
 
-/** HTTP 路由前缀。自建路由不经 harness 鉴权链路（见 AGENTS.md 3.5）。 */
+/** HTTP 路由前缀。自建路由不经 harness 鉴权链路（见 AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节）。 */
 export const API_PREFIX = '/api/agent-control'
 
 export const PATHS = {
@@ -26,7 +26,7 @@ export const PATHS = {
   restartStatus: `${API_PREFIX}/restart/status`,
   restart: `${API_PREFIX}/restart`,
   // 关闭实例。**刻意没有对应的模型工具**：关掉实例会让所有会话一起死、而且不会自动恢复，
-  // 这类操作只从界面触发（AGENTS.md 第 6 节）。它与热重启是两件事：关闭就是让进程退出，
+  // 这类操作只从界面触发（AGENTS.md 3.4）。它与热重启是两件事：关闭就是让进程退出，
   // 没有辅助进程、没有新进程、没有续作投递。
   shutdown: `${API_PREFIX}/shutdown`,
   // 模型可见的工具名。client 侧也有一份同名常量（浏览器 bundle 与 host 模块不共享模块图），
@@ -53,7 +53,7 @@ export const FEATURES = {
  * 删除类操作的失败原因。host 与 client 共用，client 按码给文案。
  *
  * `DELETE_FAILED` 与 `AGENT_BUSY` 分开是刻意的：把内部失败说成「任务正在运行」
- * 会让每一次兼容性故障都指向错误的方向（见 AGENTS.md 第 4 节坑 ①）。
+ * 会让每一次兼容性故障都指向错误的方向（见 docs/PITFALLS.md 坑 ①）。
  */
 export const ERROR_CODES = {
   invalidRequest: 'INVALID_REQUEST',

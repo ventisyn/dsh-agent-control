@@ -7,7 +7,7 @@
  *   - `src/restart-helper.mjs` 是**独立脚本**，旧进程退出后由它拉起新进程并等就绪；
  *   - 本文件把上面两块接到宿主上（`ctx` 服务、工具注册、路由数据），**只 import `node:*` 与
  *     本仓库自己的 `.mjs`**：host 端绝不能 import `@deepseek-ai/*`，顶层 import 解析失败会让
- *     整个插件消失（AGENTS.md 3.7）。
+ *     整个插件消失（AGENTS.md 3.7，细则 docs/CONTRACT.md 第 3 节）。
  *
  * 失败语义（全项目最重要的一条）：所有失败都收敛成「明确拒绝 + 说清原因」，**绝不假装重启成功**。
  * 预检不过报 `RESTART_UNSUPPORTED`（这个部署做不到），有阻塞项报 `RESTART_BLOCKED`（现在不行），
@@ -272,7 +272,7 @@ let pluginVersionCache
  * 读本插件的版本号（给设置页的「运行状态」显示）。
  *
  * 读不到就返回**空串**：状态里干脆不带这个键，界面那一行不显示——
- * 编一个版本号或显示「未知」都是假装有信息（AGENTS.md 坑 ⑨）。
+ * 编一个版本号或显示「未知」都是假装有信息（坑 ⑨，见 docs/PITFALLS.md）。
  *
  * @returns {string} 版本号，读不到时为空串。
  */
@@ -396,7 +396,7 @@ function appExitOf(ctx, deps) {
  *
  * 两道闸门，**宿主的口径优先、本插件自己的口径兜底**：
  *   1. `ctx.connection.requestRejection({ headers })` 返回 401 / 403 时**照抄**该状态；自建路由
- *      本来就不走 harness 的鉴权链路（AGENTS.md 3.5），宿主愿意替我们判一次就用它的结论。
+ *      本来就不走 harness 的鉴权链路（AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节），宿主愿意替我们判一次就用它的结论。
  *   2. 再按本插件自己的规则判一次：`origin` 存在时它的 host 必须等于 `host` 头；`origin` 缺失时
  *      必须带自定义头 `x-dsh-agent-control: 1`。
  *
@@ -604,7 +604,7 @@ function deniedByOutcome(outcome) {
 
 /**
  * 关掉这个实例（退出进程）：**只有界面能发起**——刻意不给模型任何「关闭实例」工具，
- * 因为关掉实例会让所有会话一起死、而且不会自动恢复（AGENTS.md 第 6 节）。
+ * 因为关掉实例会让所有会话一起死、而且不会自动恢复（AGENTS.md 3.4）。
  *
  * 与热重启是两件事，别混：
  *   - 关闭就是让这个进程退出，**没有辅助进程、没有新进程、没有续作投递**；
@@ -1378,7 +1378,7 @@ const TOOL_OUTPUT_SCHEMA = {
  *
  * ⚠️ `parameters` 与 `output.schema` 必须是**原生 JSON Schema**（`required` 是数组、属性上有
  * `description`）：第一方工具用 `@deepseek-ai/dsh-tools` 的 `defineTool` 把作者侧 DSL 编译成这个
- * 形状，而 host 端**不能 import `@deepseek-ai/*`**（AGENTS.md 3.7），所以这里手写编译结果。
+ * 形状，而 host 端**不能 import `@deepseek-ai/*`**（AGENTS.md 3.7，细则 docs/CONTRACT.md 第 3 节），所以这里手写编译结果。
  */
 function buildRestartToolDefinition(ctx, deps) {
   return {
@@ -1504,7 +1504,7 @@ function describeError(error) {
   return `${code}${message}`
 }
 
-/** 取一个非空字符串，拿不到就是空串（不编造，见 AGENTS.md 坑 ⑨）。 */
+/** 取一个非空字符串，拿不到就是空串（不编造，见 docs/PITFALLS.md 坑 ⑨）。 */
 function textOf(value) {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : ''
 }

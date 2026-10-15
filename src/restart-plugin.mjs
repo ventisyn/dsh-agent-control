@@ -6,7 +6,7 @@
  * 与主入口共用 `./host-wiring.mjs` 里那一份接线实现。
  *
  * ⚠️ `GET /restart/status` 同时是辅助进程的就绪探针与客户端判断这个组件在不在的探针，所以它
- * 不做可信校验（只读、不改变状态，见 AGENTS.md 3.5）。
+ * 不做可信校验（只读、不改变状态，见 AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节）。
  */
 import { FEATURES } from './shared.mjs'
 import { applyRestartFeature, featureDisabled } from './host-wiring.mjs'

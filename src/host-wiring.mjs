@@ -15,7 +15,7 @@
  *
  * 业务逻辑仍然在 `./session-delete.mjs` / `./turn-delete.mjs` / `./restart*.mjs` 里；
  * 本文件只做接线：路由、错误映射、依赖探测与降级。**不 import 任何 `@deepseek-ai/*`**
- * （host 端顶层 import 解析失败会让整个插件消失，见 AGENTS.md 3.7）。
+ * （host 端顶层 import 解析失败会让整个插件消失，见 AGENTS.md 3.7（细则 docs/CONTRACT.md 第 3 节））。
  *
  * 失败语义（全项目最重要的一条）：任何异常都收敛成「明确拒绝 + 说清原因」，
  * 绝不因为报错而假装删除成功，也绝不把内部故障说成「任务正在运行」。
@@ -230,7 +230,7 @@ export function applyTurnFeature(ctx, host) {
  * 装「热重启」组件：状态 / 重启 / 关闭三条路由 + `restart_harness` 工具 + 启动后的续作投递。
  *
  * ⚠️ `GET /restart/status` 同时是**辅助进程的就绪探针**，也是客户端判断「这个组件在不在」的探针
- * （它只读、不改变状态，见 AGENTS.md 3.5）。
+ * （它只读、不改变状态，见 AGENTS.md 3.5（细则 docs/CONTRACT.md 第 1 节））。
  *
  * @param {any} ctx - cordis 上下文。
  * @param {any} [host] - 副作用注入（`schedule` / `spawn` / `appExit` / `deferExit` 等，离线测试用）。
@@ -253,7 +253,7 @@ export function applyRestartFeature(ctx, host) {
     payload,
     req,
   ), '重启请求失败')
-  // 关闭实例：**只有界面这一条入口**（刻意没有模型工具，见 AGENTS.md 第 6 节）。
+  // 关闭实例：**只有界面这一条入口**（刻意没有模型工具，见 AGENTS.md 3.4）。
   // 可信校验与 /restart 完全一致——它是同一类「让进程消失」的能力。
   registerRoute(ctx, 'POST', PATHS.shutdown, (innerCtx, _payload, _url, req) => handleShutdownRequest(
     innerCtx,
@@ -270,7 +270,7 @@ export function applyRestartFeature(ctx, host) {
  * 注册一条 HTTP 路由，并把 disposer 交给 `ctx.effect`。
  *
  * `register` 对重复 `(kind, path)` 会抛错，所以 disposer 必须真的返回出去（写成返回 `undefined`
- * 的箭头函数时注销就完全靠 fiber 卸载，重复 apply 会撞上，见 AGENTS.md 3.5）。
+ * 的箭头函数时注销就完全靠 fiber 卸载，重复 apply 会撞上，见 AGENTS.md 3.5（细则 docs/CONTRACT.md 第 1 节））。
  *
  * @param {any} ctx - cordis 上下文。
  * @param {'GET' | 'POST'} method - 该路由接受的方法。
@@ -292,7 +292,7 @@ function registerRoute(ctx, method, routePath, handler, fallbackMessage) {
  *
  * 客户端在挂载时各拉一次，拿到 `{ ok: true, enabled: true }` 才注册对应的界面入口；
  * 组件关掉时这条路由根本不存在（404 或落宿主的鉴权 fallback），客户端于是不注册入口。
- * **只读、无参数、不改状态、不做可信校验**（GET 只读路由本来就没有那道闸门，AGENTS.md 3.5）。
+ * **只读、无参数、不改状态、不做可信校验**（GET 只读路由本来就没有那道闸门，AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节）。
  *
  * @returns {Promise<{ status: number, body: any }>} 响应。
  */
@@ -303,7 +303,7 @@ async function handleFeatureStatus() {
 /**
  * 所有会改变状态的 POST 路由共用的两道闸门：先可信、后 JSON content-type。
  *
- * 自建路由不走 harness 的鉴权链路（AGENTS.md 3.5），而 `<form enctype="text/plain">` 能让别的网页
+ * 自建路由不走 harness 的鉴权链路（AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节），而 `<form enctype="text/plain">` 能让别的网页
  * 跨站发出一个「简单请求」——体里拼出 JSON、content-type 却是 text/plain。所以两道都要：
  *   1. 可信：宿主 `connection.requestRejection` 的结论优先（401 / 403 照抄），再用本插件自己的
  *      同源 Origin / 自定义头 `x-dsh-agent-control: 1` 规则兜底（宿主服务不可用时只剩这一道）；
@@ -351,7 +351,7 @@ async function handleRestartStatus(ctx, restart) {
  *
  * 三重输入校验，缺一不可：
  *   1. 可信：先问宿主的 `connection.requestRejection`，再用本插件自己的同源/自定义头规则兜底
- *      （自建路由不走 harness 鉴权链路，AGENTS.md 3.5）；
+ *      （自建路由不走 harness 鉴权链路，AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节）；
  *   2. `content-type` 必须是 JSON（跨站表单能发简单请求，但发不出这个头）；
  *   3. `reason` 走 `assertRestartReason`（界面可以不写，缺省用一句默认中文），`force` 只认 `true`。
  *
