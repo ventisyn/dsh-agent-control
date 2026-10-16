@@ -9,12 +9,21 @@
     ".": "./src/index.mjs",
     "./client": "./client.js",
     "./session": "./src/session-plugin.mjs",
+    "./session/locale/en.json": "./locale/session/en.json",
+    "./session/locale/zh.json": "./locale/session/zh.json",
     "./turn": "./src/turn-plugin.mjs",
+    "./turn/locale/en.json": "./locale/turn/en.json",
+    "./turn/locale/zh.json": "./locale/turn/zh.json",
     "./restart": "./src/restart-plugin.mjs",
+    "./restart/locale/en.json": "./locale/restart/en.json",
+    "./restart/locale/zh.json": "./locale/restart/zh.json",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json",
     "./package.json": "./package.json"
   },
   "files": [
     "src",
+    "locale",
     "client.js",
     "cordis.patch.yml",
     "README.md",
@@ -24,7 +33,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --check src/index.mjs && node --check src/host-wiring.mjs && node --check src/session-plugin.mjs && node --check src/turn-plugin.mjs && node --check src/restart-plugin.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/features.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
+    "test": "node --check src/index.mjs && node --check src/host-wiring.mjs && node --check src/session-plugin.mjs && node --check src/turn-plugin.mjs && node --check src/restart-plugin.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/features.test.mjs && node --check test/locale.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
     "log:inspect": "node test/log-inspect.mjs"
   },
   "keywords": [

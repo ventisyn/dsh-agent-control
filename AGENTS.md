@@ -49,17 +49,18 @@
 | `client.js` | 浏览器端 bundle（`window.__ModuleLoader__.load`） |
 | `test/*.test.mjs` | 离线测试；另有 `log-inspect.mjs` 取证、`v4-load-check.mjs` 真实加载校验、`fake-session.mjs` 假内核 |
 | `cordis.patch.yml` | bundle patch：四行结构（主行 + 三个组件行，见 3.10） |
+| `locale/` | 插件列表里那四行的说明文字（`meta.description`），按行分目录存放 |
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与三个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 307 项离线测试
+npm test                                                          # node --check + 312 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、七个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 81、`client` 71、`features` 14、`turn-delete` 25、`session-delete` 40，合计 307 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、七个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 81、`client` 71、`features` 14、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 312 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -185,6 +186,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 - 客户端先探测、后注册，因为槽位一旦注册不能在运行中卸载。探不到就不注册对应槽位：宁可少一个按钮，也不留一个点了报错的按钮。
 - `approval` 按「自己那一行 > 回退 > 主行」取一份，不要合并几份，否则主行的旧值会盖掉子行的选择。`config.enabled: false` 也能关一个组件，只有明确的 `false` 才算关。
 - 别改主行的 id / name：宿主开关按 id 往 profile 的 patch 里写覆盖行，改名会让升级后的旧行失配。
+- 每行在插件列表里的说明文字取自 `meta.description`：主行在 `locale/<语言>.json`，三个组件行在 `locale/<组件>/<语言>.json`，由 `package.json` 的 `exports` 暴露。**子路径那三行永远不读 package.json**，没有 locale 文件就是空白。`files` 里必须带 `locale`，否则发布出去的包没有它。
 - 判定实现、为什么行归属在 apply 时就能看见、认领表测试钩子：[docs/CONTRACT.md](docs/CONTRACT.md) 第 6 节。
 
 ## 4. 与 DSH 版本的耦合点
