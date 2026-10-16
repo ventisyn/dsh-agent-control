@@ -130,3 +130,27 @@
 
 **磁盘现状（已实测）**：`<DSH_HOME>/sessions/<slug>/<id>/session.v4.jsonl.zstd`，`<slug>` 是工作区路径的转义形式（例如 `--D--…-dsh-agent-control--`，非 ASCII 会被转义成 `~XXXX~`），且**同一个 slug 下裸 UUID 与 `session-<UUID>` 目录并存**。所以：`<slug>` 只靠遍历，id 两种拼写都要覆盖。
 
+## 3. 关掉主行时，宿主会把它报成「失败」——那是措辞，不是故障
+
+**现象**：在插件列表里关掉主行（`dsh-agent-control`）后，宿主弹一条 toast，标题是「组件停用失败」，正文形如：
+
+```
+dsh: warning: 3 entries did not activate
+agent-control-session (dsh-agent-control/session): pending (waiting for service: agentControlCore)
+agent-control-turn (dsh-agent-control/turn): pending (waiting for service: agentControlCore)
+agent-control-restart (dsh-agent-control/restart): pending (waiting for service: agentControlCore)
+```
+
+启动日志里同样是一条 `dsh: warning: 3 entries did not activate`。
+
+**这是什么**：三个组件行 `inject` 主行提供的本体服务（AGENTS.md 3.10）。主行被关掉时那个服务不存在，
+三行的 fiber 停在 `pending`，宿主就按「有行没激活」的口径报一条 warning。**实例照常启动、界面照常工作、
+开回主行立刻恢复**——这是设计生效的证明，不是故障。
+
+**为什么不去消除这条提示**：唯一能少报一条的办法是放弃服务依赖、改用"主行先立一个进程内标志、组件行检查它"。
+那条路走不通：loader 用 `Promise.all` 并发创建各行，谁先 `apply` 没有保证，靠顺序的门会**随机失效**。
+宁可留一条措辞不准确的 warning（而且界面上的行状态是准确的：「等待依赖」），也不要一个有时管用有时不管用的总闸。
+
+**界面侧的事实**（2026-10-16 实测）：关掉主行后插件列表显示 `共 4 个 · 1 已停用`，主行「已关闭」，
+三个组件行「**等待依赖**」而它们自己的开关仍是开着的——两级开关如实呈现；四条探针与 `/sessions` 全部 401，
+与未知路由的响应逐字相同（一个路由都没注册）。
