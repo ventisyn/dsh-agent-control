@@ -65,11 +65,16 @@ function makeHost(services = {}, options = {}) {
   const warnings = []
   /** 插件往宿主事件总线上发的东西（例如删除后的 `api-session/removed`）。 */
   const emitted = []
+  /** 本体服务：生产里由主行的 `ctx.provide` 登记，这里让假 ctx 支持同一个入口。 */
+  const provided = { ...services }
   const ctx = {
     effect: (fn) => fn(),
     on() {},
     emit: (name, ...args) => emitted.push({ name, args }),
-    get: (name) => services[name],
+    get: (name) => provided[name],
+    async provide(name, value) {
+      provided[name] = value
+    },
     logger: { error: (message) => errors.push(message), warn: (message) => warnings.push(message) },
     webServer: {
       register(route) {

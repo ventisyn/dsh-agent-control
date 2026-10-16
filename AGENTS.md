@@ -53,14 +53,14 @@
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与三个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 312 项离线测试
+npm test                                                          # node --check + 314 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、七个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 81、`client` 71、`features` 14、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 312 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、七个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 81、`client` 71、`features` 16、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 314 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -180,7 +180,10 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 
 插件列表里本插件下有四行：core（`agent-control`）加三个组件行（`agent-control-session` / `-turn` / `-restart`）。右侧开关调用宿主的 `pluginManager/setPluginEnabled(entryId, enabled)`，宿主把那一行标成 `disabled` 写进 profile 的 patch，重启实例后生效。
 
-- 被禁用的行，loader 不调用它的 `apply`。所以关掉一个组件 = 那段接线从未执行，而不是装上了再关。主入口也因此不能无条件把三个组件都装上，否则关掉子行不起作用。
+- 开关是**两级**的：主行是总闸，三个组件行是分闸。主行 `provide` 出本体服务 `agentControlCore`，组件行 `inject` 它——**主行被关掉时服务不存在，组件行的 fiber 停在 `pending`，一个路由都不会注册**；宿主自己的 inventory 把 pending 如实报给界面，不会显示成运行中。
+- 为什么用服务依赖而不是进程内的布尔标志：loader 用 `Promise.all` 并发创建各行，谁先 `apply` 没有保证，靠顺序的写法会随机失败。服务依赖是 cordis 与官方插件的标准做法（`dsh-skill-filesystem` 声明 `inject: ['skills']`、`dsh-storage-json` 声明 `inject: ['storage']`）。
+- 代价：组件行**不能再单独加载**（依赖是硬的）。旧配置（只有主行）不受影响，那条路是主行代装。
+- 被禁用的行，loader 不调用它的 `apply`。所以关掉一个组件 = 那段接线从未执行，而不是装上了再关。接线函数里另有一道兜底：拿不到本体服务就整个跳过。
 - 谁负责注册：行树里有 `dsh-agent-control/<组件>` 这一行，就由那一行负责（关掉时谁都不装）；没有那一行（例如只有一行 `agent-control` 的旧 profile），由主入口代装，行为与从前一致。
 - 三个组件的接线只有一份实现：`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` / `applyRestartFeature`。进程内的认领表挡住重复注册（`webServer.register` 对同一 `(kind, path)` 会抛错），认领随 `ctx.effect` 清理释放。
 - 客户端先探测、后注册，因为槽位一旦注册不能在运行中卸载。探不到就不注册对应槽位：宁可少一个按钮，也不留一个点了报错的按钮。

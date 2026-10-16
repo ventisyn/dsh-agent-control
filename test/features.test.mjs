@@ -19,7 +19,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { FEATURES, PATHS } from '../src/shared.mjs'
+import { CORE_SERVICE, FEATURES, PATHS } from '../src/shared.mjs'
 import { resetFeatureClaimsForTest } from '../src/host-wiring.mjs'
 
 const main = await import('../src/index.mjs')
@@ -79,6 +79,8 @@ function makeSystem() {
 function makeRow(system, services = {}) {
   const effects = []
   const events = []
+  /** 这个假 ctx 被 `provide()` 登记过的服务（真宿主由 cordis 的 reflect 层维护）。 */
+  const provided = { ...services }
   const ctx = {
     effect(fn, label) {
       effects.push(label ?? '')
@@ -91,12 +93,29 @@ function makeRow(system, services = {}) {
     get(name) {
       if (name === 'webServer') return system.webServer
       if (name === 'tools') return system.toolsService
-      return services[name]
+      return provided[name]
+    },
+    /** 真 cordis 是 `ctx.provide(name, value)`；这里只登记，够组件行 `get` 到。 */
+    async provide(name, value) {
+      effects.push(`ctx.provide(${JSON.stringify(name)})`)
+      provided[name] = value
     },
     webServer: system.webServer,
     logger: { error: () => {}, warn: () => {}, debug: () => {} },
   }
   return { ctx, effects, events }
+}
+
+/**
+ * 模拟真宿主的装配：主行先 apply（提供本体服务），再 apply 组件行。
+ *
+ * 组件行 `inject` 本体服务，所以这个顺序在真进程里由 cordis 保证；离线测试里要自己摆。
+ */
+async function withCore(system, services = {}) {
+  const core = makeRow(system, services)
+  main.apply(core.ctx, { approval: 'ask' }, services)
+  await Promise.resolve()
+  return core
 }
 
 /** 调一次路由（默认 GET），返回 `{ status, body }`。 */
@@ -127,12 +146,17 @@ function tempHome(t) {
  * 假的「插件行环境」：热重启那一组要 `appReady` 才不落回定时器，`dshHome` 指向临时目录。
  *
  * 给一个 `onReady`（不回调）就等于「应用还没就绪」：不会真的去投递续作、也不会碰盘。
+ *
+ * `core: true`（缺省）时额外注入**本体服务**——真进程里那是主行 `provide` 出来的，组件行
+ * `inject` 它；离线测试里由这里手给，`core: false` 用来模拟「主行被关掉」。
  */
 function rowEnv(home, extra = {}) {
+  const { core = true, ...rest } = extra
   return {
     dshHome: home,
     appReady: { onReady: () => {} },
-    ...extra,
+    ...(core ? { [CORE_SERVICE]: { coreConfig: () => undefined } } : {}),
+    ...rest,
   }
 }
 
@@ -140,12 +164,13 @@ function rowEnv(home, extra = {}) {
 // 1. 三个子插件各自单独存在
 // ---------------------------------------------------------------------------
 
-test('只加载 session 子插件：只注册它自己那三条路由，别的路径一个都没有', () => {
+test('只加载 session 子插件：只注册它自己那三条路由，别的路径一个都没有', (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
-  const row = makeRow(system)
+  const env = rowEnv(tempHome(t))
+  const row = makeRow(system, env)
 
-  sessionRow.apply(row.ctx, undefined, undefined)
+  sessionRow.apply(row.ctx, undefined, env)
 
   assert.deepEqual([...system.routes.keys()].sort(), ROUTES.session.map(keyOf).sort())
   assert.deepEqual(row.effects.map((label) => label.replace(/^dsh-agent-control: /, '')).sort(),
@@ -164,10 +189,11 @@ test('只加载 session 子插件：只注册它自己那三条路由，别的�
   assert.deepEqual(row.events, [], '这一组不订阅任何宿主事件')
 })
 
-test('只加载 turn 子插件：只注册它自己那三条路由', () => {
+test('只加载 turn 子插件：只注册它自己那三条路由', (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
-  turnRow.apply(makeRow(system).ctx, undefined, undefined)
+  const env = rowEnv(tempHome(t))
+  turnRow.apply(makeRow(system, env).ctx, undefined, env)
   assert.deepEqual([...system.routes.keys()].sort(), ROUTES.turn.map(keyOf).sort())
   assert.deepEqual(system.tools, [])
 })
@@ -184,10 +210,11 @@ test('只加载 restart 子插件：三条路由 + restart_harness 工具一次'
   assert.equal(system.routes.has(keyOf(PATHS.turns)), false, 'turn 组件的路由不该出现')
 })
 
-test('组件的只读探针：只读、200、`{ ok: true, enabled: true }`，且不接受 POST', async () => {
+test('组件的只读探针：只读、200、`{ ok: true, enabled: true }`，且不接受 POST', async (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
-  sessionRow.apply(makeRow(system).ctx, undefined, undefined)
+  const env = rowEnv(tempHome(t))
+  sessionRow.apply(makeRow(system, env).ctx, undefined, env)
 
   const probe = await callRoute(system, FEATURES.session.probe)
   assert.equal(probe.status, 200)
@@ -333,6 +360,34 @@ test('主入口：loader 服务拿不到时按「没有自己那一行」处理�
 })
 
 // ---------------------------------------------------------------------------
+// 3.5 总闸：本体服务不在（= 主行被关掉）时，组件一个路由都不注册
+// ---------------------------------------------------------------------------
+
+test('主行不在（本体服务拿不到）⇒ 组件行零注册、零订阅', (t) => {
+  resetFeatureClaimsForTest()
+  const system = makeSystem()
+  const home = tempHome(t)
+
+  for (const [name, row] of [['session', sessionRow], ['turn', turnRow], ['restart', restartRow]]) {
+    const env = rowEnv(home, { core: false })   // 主行被关掉：本体服务不存在
+    const target = makeRow(system, env)
+    row.apply(target.ctx, undefined, env)
+    assert.deepEqual(target.effects, [], `${name}：本体不在时不该注册任何东西`)
+    assert.deepEqual(target.events, [], `${name}：本体不在时不该订阅任何事件`)
+  }
+  assert.equal(system.routes.size, 0, '★ 一个路由都不该有')
+  assert.deepEqual(system.tools, [], '重启工具也不该注册')
+})
+
+test('三个组件行都声明了 inject 本体服务（真进程里靠这条停在 pending）', () => {
+  for (const [name, row] of [['session', sessionRow], ['turn', turnRow], ['restart', restartRow]]) {
+    assert.ok(Array.isArray(row.inject), `${name} 没有 inject 声明`)
+    assert.ok(row.inject.includes(CORE_SERVICE), `${name} 的 inject 缺少 ${CORE_SERVICE}`)
+    assert.ok(row.inject.includes('webServer'), `${name} 的 inject 缺少 webServer`)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // 4. config.enabled: false
 // ---------------------------------------------------------------------------
 
@@ -351,11 +406,12 @@ test('config.enabled: false ⇒ 那个子插件零注册、零订阅、也不抛
   assert.deepEqual(system.tools, [])
 })
 
-test('只有明确的 false 才算关：写成字符串 "false" 之类照旧启用（宁可多装一个组件）', () => {
+test('只有明确的 false 才算关：写成字符串 "false" 之类照旧启用（宁可多装一个组件）', (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
+  const env = { ...rowEnv(tempHome(t)), core: true }
 
-  sessionRow.apply(makeRow(system).ctx, { enabled: 'false' }, undefined)
+  sessionRow.apply(makeRow(system, env).ctx, { enabled: 'false' }, env)
 
   assert.deepEqual([...system.routes.keys()].sort(), ROUTES.session.map(keyOf).sort())
 })

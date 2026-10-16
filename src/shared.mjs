@@ -43,6 +43,17 @@ export const PATHS = {
  * 热重启复用已有的 `GET /restart/status`（它本来就是辅助进程的就绪探针，只读、不改变状态），
  * 所以不再多开一条路由。
  */
+/**
+ * 主行（core）提供给组件行的服务名。
+ *
+ * 组件行 `inject` 它：**依赖不满足时 cordis 不会调用组件的 `apply`**（fiber 停在 pending），
+ * 所以关掉主行 = 三个组件一起下线。这是官方插件之间表达依赖的标准方式（例如
+ * `dsh-skill-filesystem` 声明 `inject: ['skills']`、`dsh-storage-json` 声明 `inject: ['storage']`）。
+ *
+ * 名字刻意不带 `dsh-` 前缀：那个前缀是官方包名空间，这是本插件自己的服务。
+ */
+export const CORE_SERVICE = 'agentControlCore'
+
 export const FEATURES = {
   session: { plugin: `${PLUGIN_NAME}/session`, probe: `${API_PREFIX}/session/status` },
   turn: { plugin: `${PLUGIN_NAME}/turn`, probe: `${API_PREFIX}/turn/status` },

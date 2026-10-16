@@ -26,6 +26,7 @@ import {
   applySessionFeature,
   applyTurnFeature,
   hasOwnRow,
+  provideCoreService,
   rememberCoreRowConfig,
   sessionsRoot,
 } from './host-wiring.mjs'
@@ -48,7 +49,10 @@ export const hostInject = ['webServer']
 export const inject = hostInject
 
 /**
- * 这一行（core）的入口：把「没有自己那一行」的组件装上，然后做启动清理。
+ * 这一行（core）的入口：提供本体服务、把「没有自己那一行」的组件装上，然后做启动清理。
+ *
+ * **本体服务**（`agentControlCore`）是三个组件行 `inject` 的依赖，也是"总闸"：关掉本行，
+ * 那三个 fiber 停在 pending，界面会如实显示它们未运行。
  *
  * 三个组件行的接线函数是**同一份实现**（`./host-wiring.mjs`）：
  *   - 组件有自己那一行 → 这里让开（由那一行负责；那一行被关掉时谁都不装，路由随之消失）；
@@ -67,6 +71,9 @@ export const inject = hostInject
 export function apply(ctx, config, host) {
   // 主行的配置要在装配组件**之前**记下：热重启那一行的 apply 会回退读它（拆行之后旧配置仍写在主行）。
   rememberCoreRowConfig(config)
+  // 本体服务：三个组件行 `inject` 它，所以这一行是总闸——关掉本行，组件行拿不到服务、停在 pending，
+  // 一个路由都不会注册（见 host-wiring.mjs 的 provideCoreService）。
+  void provideCoreService(ctx)
   if (!hasOwnRow(ctx, 'session')) applySessionFeature(ctx, host)
   if (!hasOwnRow(ctx, 'turn')) applyTurnFeature(ctx, host)
   // 重启的接线要用插件行的 `config`（审批策略由它决定），所以把 config 一起交给它。

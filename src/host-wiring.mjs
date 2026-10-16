@@ -24,6 +24,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
+  CORE_SERVICE,
   ControlError,
   ERROR_CODES,
   FEATURES,
@@ -87,6 +88,52 @@ let coreRowConfig
 /** 记下主行的 `config`（供没有自己配 `approval` 的组件行回退）。 */
 export function rememberCoreRowConfig(config) {
   coreRowConfig = config
+}
+
+/**
+ * 本体服务：主行在 `apply` 里提供它，三个组件行 `inject` 它。
+ *
+ * 为什么要有这个服务：插件列表里四个开关是**两级**的——主行是总闸，三个组件行是分闸。
+ * 分闸只在总闸合上时才有意义，而"合没合上"不能靠进程内的一个布尔量（loader 用
+ * `Promise.all` 并发创建各行，谁先 apply 没有保证），必须靠 cordis 自己的服务依赖：
+ * 主行被关掉 → 服务不存在 → 组件行的 fiber 停在 pending → 那段接线从未执行。
+ *
+ * 服务本身只暴露主行的配置（热重启行的 `approval` 回退要用）；真正的门是"它在不在"。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @returns {Promise<void>} 服务登记完成（`provide` 会挂在当前 fiber 上，随其卸载注销）。
+ */
+export async function provideCoreService(ctx) {
+  const provide = ctx?.provide
+  if (typeof provide !== 'function') {
+    // 离线测试的假 ctx 没有 `provide`：那种场景下组件行由测试直接注入服务（见 features.test.mjs）。
+    logQuiet(ctx, `${PLUGIN_NAME}: 这个上下文没有 provide()，本体服务没有登记`)
+    return
+  }
+  await provide.call(ctx, CORE_SERVICE, {
+    /** 主行的 `config`（组件行读它做 `approval` 回退）。 */
+    coreConfig: () => coreRowConfig,
+  })
+}
+
+/** 读本体服务（组件行通过 `inject` 保证它在；这里只做一次安全取值）。 */
+export function coreServiceOf(ctx) {
+  return safeCall(() => ctx?.get?.(CORE_SERVICE))
+}
+
+/**
+ * 本体服务不在时的拒绝：把这段组件接线**整个跳过**，一个路由都不注册。
+ *
+ * 组件行已经声明了 `inject: [CORE_SERVICE]`，正常情况下 cordis 不会调用到这里（fiber 停在 pending）。
+ * 这道检查是给「不通过行、直接调用接线函数」准备的兜底，也让「主行不在 ⇒ 组件不工作」这条规则在
+ * 离线测试里可断言，而不是只存在于宿主的行为里。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {'session' | 'turn' | 'restart'} feature - 组件名。
+ * @returns {void}
+ */
+function refuseWithoutCore(ctx, feature) {
+  logQuiet(ctx, `${PLUGIN_NAME}: 本体服务 ${CORE_SERVICE} 不在，组件 ${feature} 不装配`)
 }
 
 /**
@@ -200,6 +247,7 @@ function logQuiet(ctx, message) {
  * @returns {void}
  */
 export function applySessionFeature(ctx, host) {
+  if (!coreServiceOf(ctx)) return refuseWithoutCore(ctx, 'session')
   if (!claimFeature(ctx, 'session')) return
   registerRoute(ctx, 'GET', FEATURES.session.probe, () => handleFeatureStatus())
   registerRoute(ctx, 'GET', PATHS.sessions, (innerCtx) => handleListSessions(innerCtx))
@@ -220,6 +268,7 @@ export function applySessionFeature(ctx, host) {
  * @returns {void}
  */
 export function applyTurnFeature(ctx, host) {
+  if (!coreServiceOf(ctx)) return refuseWithoutCore(ctx, 'turn')
   if (!claimFeature(ctx, 'turn')) return
   registerRoute(ctx, 'GET', FEATURES.turn.probe, () => handleFeatureStatus())
   registerRoute(ctx, 'GET', PATHS.turns, (innerCtx, _payload, url) => handleListDeletedTurns(innerCtx, _payload, url))
@@ -239,11 +288,13 @@ export function applyTurnFeature(ctx, host) {
  * @returns {void}
  */
 export function applyRestartFeature(ctx, host) {
+  if (!coreServiceOf(ctx)) return refuseWithoutCore(ctx, 'restart')
   if (!claimFeature(ctx, 'restart')) return
   // 审批策略的来源按优先级挑**一个**：自己那一行的 `config` > 调用方给的 `fallbackConfig` >
   // 进程里记下的主行配置。绝不能把几份直接合并——合并会让「子行写了 ask、主行写着 auto」时
   // 主行的值把子行的选择盖掉（主行与子行**都**带 `approval` 是常态）。
-  const config = pickApprovalConfig(host?.config, host?.fallbackConfig, coreRowConfig)
+  const coreConfig = host?.fallbackConfig ?? coreServiceOf(ctx)?.coreConfig?.() ?? coreRowConfig
+  const config = pickApprovalConfig(host?.config, coreConfig)
   // 重启现场的「快照 + 副作用」在这里读一次；两条路由与工具共用同一份（单飞锁、限频账本因此只有一份）。
   const restart = createRestartState(ctx, { ...host, config })
   registerRoute(ctx, 'GET', PATHS.restartStatus, (innerCtx) => handleRestartStatus(innerCtx, restart))
