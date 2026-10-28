@@ -7,3 +7,6 @@ Thumbs.db
 
 # 本机特有信息（AGENTS.md 第 5 节）：只留在本机，绝不进仓库
 AGENTS.local.md
+
+# 本地删除归档（agent 不直接删文件，见 AGENTS.md §7）
+trash/
