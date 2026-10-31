@@ -232,7 +232,7 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>               
 
 ## 6. 版本号与发布流程
 
-版本号是 `<harness 版本>-v<插件版本>`，例如 `0.2.1-rc.5-v1.3.4`。`package.json` 的 `version` 是唯一真源，它同时是版本分支名、tag 名 `release/<完整版本号>` 与 GitHub Release 的标题（标题不带 `release/` 前缀）。
+版本号是 `<harness 版本>-v<插件版本>`，例如 `0.2.1-rc.5-v1.3.5`。`package.json` 的 `version` 是唯一真源，它同时是版本分支名、tag 名 `release/<完整版本号>` 与 GitHub Release 的标题（标题不带 `release/` 前缀）。
 
 插件版本 `X.Y.Z`：X 是不兼容的破坏性变更（路由路径、请求结构、错误码含义、旧日志不再兼容），Y 是向后兼容的新功能，Z 是向后兼容的修复，纯文档改动走 Z。换 harness 版本等于新开一条版本线，插件版本继续累加，不重置。
 
