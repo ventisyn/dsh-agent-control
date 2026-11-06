@@ -198,6 +198,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 | --- | --- | --- |
 | 分支名 / 安装 ref | `<harness 版本>-v<插件版本>`，与 `package.json` 的 `version` 完全一致 | 每次发布（从 dev 分支改名而来） |
 | `package.json` 的 `version` | 完整版本号，唯一真源 | 开 dev 时提到目标版本 |
+| `package.json` 的 `engines.dsh` | 本版本线支持的 harness 下限（0.2.2 起宿主据此拦截不兼容插件） | 换 harness 版本线时更新 |
 
 分支名是完整版本号，profile 名只是其中的 harness 版本，两者不相等，改动时分别对齐，都现查。实测记录在 `docs/VERIFY-<完整版本号>.md`，含未验证项。profile 路径不写死在源码里：需要时按 `profileContext.patchPath` → `profileContext.dir` → 命令行 `--profile <name>` 依次解析，拿不到就不写，只记 warn。
 
@@ -232,7 +233,7 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>               
 
 ## 6. 版本号与发布流程
 
-版本号是 `<harness 版本>-v<插件版本>`，例如 `0.2.1-rc.5-v1.3.5`。`package.json` 的 `version` 是唯一真源，它同时是版本分支名、tag 名 `release/<完整版本号>` 与 GitHub Release 的标题（标题不带 `release/` 前缀）。
+版本号是 `<harness 版本>-v<插件版本>`，例如 `0.2.2-rc.1-v1.3.6`。`package.json` 的 `version` 是唯一真源，它同时是版本分支名、tag 名 `release/<完整版本号>` 与 GitHub Release 的标题（标题不带 `release/` 前缀）。
 
 插件版本 `X.Y.Z`：X 是不兼容的破坏性变更（路由路径、请求结构、错误码含义、旧日志不再兼容），Y 是向后兼容的新功能，Z 是向后兼容的修复，纯文档改动走 Z。换 harness 版本等于新开一条版本线，插件版本继续累加，不重置。
 
