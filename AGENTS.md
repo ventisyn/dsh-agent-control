@@ -7,7 +7,7 @@
 | 想知道 | 读 |
 | --- | --- |
 | 路由表、事件形状、服务边界、加载期约束、热重启与组件开关 | [docs/CONTRACT.md](docs/CONTRACT.md) |
-| 十二个坑、归档遮盖的实现经过 | [docs/PITFALLS.md](docs/PITFALLS.md) |
+| 十三个坑、归档遮盖的实现经过 | [docs/PITFALLS.md](docs/PITFALLS.md) |
 | 分支与发布流程 | [docs/RELEASING.md](docs/RELEASING.md) |
 | 每次实测的结论与未验证项 | `docs/VERIFY-<完整版本号>.md` |
 | 术语与决策 | [GLOSSARY.md](GLOSSARY.md)、`docs/adr/` |
@@ -56,14 +56,14 @@
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与五个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 332 项离线测试
+npm test                                                          # node --check + 333 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 85、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 332 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 86、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 333 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -211,7 +211,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 - **排障抓手**：`window.__dshAgentControl.observe.systemNotify` 给出 `{ supported, permission, request, show }`（`permission` 为 `granted` / `denied` / `default` / `unsupported`，`show(sessionId)` 手动弹一条并返回是否真的弹出）；`observe.stats()` 是 `{ chimes, notifications }`，两个计数各自递增，用来判断完成边沿到底触发了哪一半。界面文案在 `client.js` 内嵌 `MESSAGES` 的 `notify.system.*`（zh / en 两套），`locale/notify/{zh,en}.json` 的 `meta.description` 同步提到系统通知。
 - **音效现场合成**：三音 / 单音 / 钟声 / 不响，音量可调，全部用 Web Audio 合成，不下载音频文件。
 - **浏览器要求页面先被点过一次才允许出声**：音频上下文起不来时铃声静默降级——不抛错、不影响其它功能。系统通知同样受浏览器策略约束（权限必须来自用户手势），降级方向是「安静」，不是「假装弹过」。
-- **设置页一节**「任务完成提醒」注册在 `settings.section`，order 510（紧跟热重启那一节的 500）。这一节有铃声开关 / 音效 / 试听 / 音量 / 提醒范围，以及「系统通知」行（复选框 + 权限状态 + 「测试通知」按钮；环境不支持时复选框禁用、未授权时按钮禁用；权限状态如实显示「已授权 / 尚未授权 / 已被浏览器阻止 / 这个环境不支持系统通知」）。偏好（`chime` / `sound` / `volume` / `scope` / `systemNotify`）存在 `localStorage` 的 `dsh-agent-control:observe` 键里，与 cost 行共用一份设置对象，但界面上分成两节；`normalizeObservePrefs` 只认 `source.systemNotify === true`，缺字段一律按 `false`。
+- **设置页一节**「任务完成提醒」注册在 `settings.section`，order 510（紧跟热重启那一节的 500）。这一节有铃声开关 / 音效 / 试听 / 音量 / 提醒范围，以及「系统通知」行（复选框 + 权限状态 + 「测试通知」按钮；只有环境确实没有 `Notification` 时按钮才禁用，点击时实时读 / 请求权限并在行内显示结果——已发出 / 没授予 / 发出失败；权限状态如实显示「已授权 / 尚未授权 / 已被浏览器阻止 / 这个环境不支持系统通知」，并在窗口重新获得焦点时同步）。偏好（`chime` / `sound` / `volume` / `scope` / `systemNotify`）存在 `localStorage` 的 `dsh-agent-control:observe` 键里，与 cost 行共用一份设置对象，但界面上分成两节；`normalizeObservePrefs` 只认 `source.systemNotify === true`，缺字段一律按 `false`。
 - 关掉这一行 = 不订阅完成事件、不响铃、不弹系统通知、也不注册这一节；花费徽章与「每轮花费」那一节照常（两行是两个独立开关）。
 
 ### 3.12 每轮花费（cost 行）
@@ -364,7 +364,7 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>               
 
 | 旧编号 | 现在 |
 | --- | --- |
-| 第 4 节「与 DSH 版本的耦合点」+「已经踩过的坑 ①–⑫」 | §4（摘要）+ [docs/PITFALLS.md](docs/PITFALLS.md) 第 1 节（全文） |
+| 第 4 节「与 DSH 版本的耦合点」+「已经踩过的坑 ①–⑬」 | §4（摘要）+ [docs/PITFALLS.md](docs/PITFALLS.md) 第 1 节（全文） |
 | 第 5 节「开发环境」 | §5 |
 | 第 6 节「编码约定」 | §7 |
 | 第 7 节「Git 提交规范」 | §8 |
@@ -374,4 +374,4 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>               
 | 第 11 节「版本号规范」 | §6 |
 | 3.1–3.12 | §3 同名小节，全文在 [docs/CONTRACT.md](docs/CONTRACT.md) |
 | 旧 3.x 子标题 | 「幽灵会话」→ §3.1；「让那一行真的消失：借归档当临时遮盖」→ §3.1 与 [docs/PITFALLS.md](docs/PITFALLS.md) 第 2 节；「怎么证明上面这些真的发生了」→ §3.6；「X.Y.Z 的含义」→ §6 |
-| 「坑 ①–⑫」 | [docs/PITFALLS.md](docs/PITFALLS.md) 第 1 节，编号没改 |
+| 「坑 ①–⑬」 | [docs/PITFALLS.md](docs/PITFALLS.md) 第 1 节，编号没改 |
