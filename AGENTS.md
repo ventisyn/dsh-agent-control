@@ -16,13 +16,13 @@
 
 ## 1. 这是什么
 
-`dsh-agent-control` 是 DSH 的持久插件，管三件破坏性操作：
+`dsh-agent-control` 是 DSH 的持久插件：管三件破坏性操作，另附两项只读的浏览器端功能（任务完成铃声与每轮花费，见 3.11）。
 
 - **会话级**：列会话、把会话连同磁盘目录与工作区记账一起删掉
 - **轮次级**：从**模型可见上下文**里移除一轮对话（会话、后面的轮次、append-only 日志都保留）
 - **热重启**：重启宿主进程并在重启后自动续作；另有一个「关闭实例」按钮，只有界面入口
 
-三类操作共用一个确认弹窗、一套失败语义。新能力挂在同一套结构上，不另开插件。
+三类操作共用一个确认弹窗、一套失败语义。新能力挂在同一套结构上，不另开插件。提醒与花费不参与这套确认流程：它们不删东西、不改状态，只是浏览器里的声音与显示。
 
 能力与首个完成版本：
 
@@ -31,7 +31,8 @@
 | 会话删除（幽灵清理、活会话、归档遮盖、界面让开） | `0.2.0-rc.2-v1.0.0`，`0.2.1-alpha.2-v1.2.0` 收口 |
 | 轮次删除 | `0.2.0-rc.2-v1.0.0` |
 | 热重启 / 关闭实例（关闭无模型工具） | `0.2.1-alpha.1-v1.1.0` |
-| 组件级开关（四行结构） | `0.2.1-alpha.2-v1.3.0` |
+| 组件级开关（五行结构） | `0.2.1-alpha.2-v1.3.0`（四行）；`0.2.2-rc.1-v1.4.0` 增至五行 |
+| 任务完成铃声与每轮花费（`observe` 行） | `0.2.2-rc.1-v1.4.0` |
 | `DELETE_FAILED` 的真实渲染 | 未验证，见 `docs/VERIFY-*` 的「仍然未验证」 |
 
 典型失败模式是**静默降级**：不报错、路由全部 200，但没干活（删除返回成功东西还在、按钮点了没反应），或者换个 harness 版本后插件照常加载、只是永远不生效（见 §4）。本项目只用 DSH 的公开 API，不 fork、不 vendoring、不复制第三方插件源码（公开/私有分界见 3.3）。
@@ -40,27 +41,27 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `src/host-wiring.mjs` | 三个组件的接线实现（路由、错误映射、依赖探测）、组件认领表、行归属判定 |
+| `src/host-wiring.mjs` | 四个组件的接线实现（路由、错误映射、依赖探测）、组件认领表、行归属判定 |
 | `src/index.mjs` | core 行入口：客户端 bundle 交付、启动清理、按行构建各组件 |
-| `src/session-plugin.mjs` / `turn-plugin.mjs` / `restart-plugin.mjs` | 三个组件行的入口，可单独加载 |
+| `src/session-plugin.mjs` / `turn-plugin.mjs` / `restart-plugin.mjs` / `observe-plugin.mjs` | 四个组件行的入口，可单独加载 |
 | `src/session-delete.mjs` / `turn-delete.mjs` | 业务纯逻辑，不 import cordis，可离线单测 |
 | `src/restart*.mjs` | `restart` 纯逻辑 / `restart-helper` 辅助进程 / `restart-tool` 接线与护栏 |
 | `src/shared.mjs` | host 与 client 共用常量与纯工具（路由路径、错误码、id 校验、轮次括号） |
 | `client.js` | 浏览器端 bundle（`window.__ModuleLoader__.load`） |
 | `test/*.test.mjs` | 离线测试；另有 `log-inspect.mjs` 取证、`v4-load-check.mjs` 真实加载校验、`fake-session.mjs` 假内核 |
-| `cordis.patch.yml` | bundle patch：四行结构（主行 + 三个组件行，见 3.10） |
-| `locale/` | 插件列表里那四行的说明文字（`meta.description`），按行分目录存放 |
-| `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与三个组件子路径 |
+| `cordis.patch.yml` | bundle patch：五行结构（主行 + 四个组件行，见 3.10） |
+| `locale/` | 插件列表里那五行的说明文字（`meta.description`），按行分目录存放 |
+| `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与四个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 314 项离线测试
+npm test                                                          # node --check + 326 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、七个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 81、`client` 71、`features` 16、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 314 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 80、`features` 17、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 326 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -129,6 +130,7 @@ GET  /api/agent-control/sessions            # { ok, sessions: [{ sessionId, work
 GET  /api/agent-control/turns?sessionId=    # { ok, sessionId, turns: number[] }，只有活动会话可读，未打开 → TARGET_NOT_FOUND
 GET  /api/agent-control/session/status      # 组件探针，只读
 GET  /api/agent-control/turn/status         # 组件探针，只读
+GET  /api/agent-control/observe/status      # 提醒与花费组件的探针，只读；这一行只有这一条路由
 POST /api/agent-control/session/delete      # { sessionId }
 POST /api/agent-control/turn/delete         # { sessionId, assistantMessageId }
 GET  /api/agent-control/restart/status      # 重启状态 + 辅助进程就绪探针 + 重启组件探针，不做可信校验
@@ -158,7 +160,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 
 ### 3.8 数据与运行环境
 
-插件自己不落数据文件：没有配置、没有审计日志、没有缓存。唯一的持久事实是写进会话日志的删除事务。
+插件自己不落数据文件：没有配置、没有审计日志、没有缓存。唯一的持久事实是写进会话日志的删除事务。浏览器端 observe 的设置存在 `localStorage`，不属于这里说的数据文件：不进 profile、不写磁盘，换浏览器即回到默认值（3.11）。
 
 唯一的受控例外是热重启的交接文件 `$DSH_HOME/agent-control/restart/`：`pending.json` 读一次就删，`spec.json`（含 env，权限仅当前用户，env 值绝不写进日志）启动后删，`last.json` 留给设置页；新进程的 stdout/stderr 写到 `$DSH_HOME/logs/agent-control-restart-<时间戳>.log`。不要再往这个目录加东西。
 
@@ -176,21 +178,36 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 - 关闭实例不等空闲，但尽力 flush（每个活动会话最多等 500 ms）。响应顺序是硬要求：先发 202，再用 `deferExit` 退出，反过来的话 202 会被 `closeAllConnections()` 掐断。幂等，退出窗口内第二次得到 409。
 - 状态机、续作投递、限频账本、DSHL 细节：[docs/CONTRACT.md](docs/CONTRACT.md) 第 5 节。
 
-### 3.10 组件级开关（四行结构）
+### 3.10 组件级开关（五行结构）
 
-插件列表里本插件下有四行：core（`agent-control`）加三个组件行（`agent-control-session` / `-turn` / `-restart`）。右侧开关调用宿主的 `pluginManager/setPluginEnabled(entryId, enabled)`，宿主把那一行标成 `disabled` 写进 profile 的 patch，重启实例后生效。
+插件列表里本插件下有五行：core（`agent-control`）加四个组件行（`agent-control-session` / `-turn` / `-restart` / `-observe`）。右侧开关调用宿主的 `pluginManager/setPluginEnabled(entryId, enabled)`，宿主把那一行标成 `disabled` 写进 profile 的 patch，重启实例后生效。
 
-- 开关是**两级**的：主行是总闸，三个组件行是分闸。主行 `provide` 出本体服务 `agentControlCore`，组件行 `inject` 它——**主行被关掉时服务不存在，组件行的 fiber 停在 `pending`，一个路由都不会注册**；宿主自己的 inventory 把 pending 如实报给界面，不会显示成运行中。
+- 开关是**两级**的：主行是总闸，四个组件行是分闸。主行 `provide` 出本体服务 `agentControlCore`，组件行 `inject` 它——**主行被关掉时服务不存在，组件行的 fiber 停在 `pending`，一个路由都不会注册**；宿主自己的 inventory 把 pending 如实报给界面，不会显示成运行中。
 - 为什么用服务依赖而不是进程内的布尔标志：loader 用 `Promise.all` 并发创建各行，谁先 `apply` 没有保证，靠顺序的写法会随机失败。服务依赖是 cordis 与官方插件的标准做法（`dsh-skill-filesystem` 声明 `inject: ['skills']`、`dsh-storage-json` 声明 `inject: ['storage']`）。
 - 代价：组件行**不能再单独加载**（依赖是硬的）。旧配置（只有主行）不受影响，那条路是主行代装。
 - 被禁用的行，loader 不调用它的 `apply`。所以关掉一个组件 = 那段接线从未执行，而不是装上了再关。接线函数里另有一道兜底：拿不到本体服务就整个跳过。
 - 谁负责注册：行树里有 `dsh-agent-control/<组件>` 这一行，就由那一行负责（关掉时谁都不装）；没有那一行（例如只有一行 `agent-control` 的旧 profile），由主入口代装，行为与从前一致。
-- 三个组件的接线只有一份实现：`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` / `applyRestartFeature`。进程内的认领表挡住重复注册（`webServer.register` 对同一 `(kind, path)` 会抛错），认领随 `ctx.effect` 清理释放。
+- 四个组件的接线只有一份实现：`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` / `applyRestartFeature` / `applyObserveFeature`（最后这个只注册一条只读探针，功能全在浏览器里，见 3.11）。进程内的认领表挡住重复注册（`webServer.register` 对同一 `(kind, path)` 会抛错），认领随 `ctx.effect` 清理释放。
 - 客户端先探测、后注册，因为槽位一旦注册不能在运行中卸载。探不到就不注册对应槽位：宁可少一个按钮，也不留一个点了报错的按钮。
 - `approval` 按「自己那一行 > 回退 > 主行」取一份，不要合并几份，否则主行的旧值会盖掉子行的选择。`config.enabled: false` 也能关一个组件，只有明确的 `false` 才算关。
 - 别改主行的 id / name：宿主开关按 id 往 profile 的 patch 里写覆盖行，改名会让升级后的旧行失配。
-- 每行在插件列表里的说明文字取自 `meta.description`：主行在 `locale/<语言>.json`，三个组件行在 `locale/<组件>/<语言>.json`，由 `package.json` 的 `exports` 暴露。**子路径那三行永远不读 package.json**，没有 locale 文件就是空白。`files` 里必须带 `locale`，否则发布出去的包没有它。
+- 每行在插件列表里的说明文字取自 `meta.description`：主行在 `locale/<语言>.json`，四个组件行在 `locale/<组件>/<语言>.json`，由 `package.json` 的 `exports` 暴露。**子路径那四行永远不读 package.json**，没有 locale 文件就是空白。`files` 里必须带 `locale`，否则发布出去的包没有它。
 - 判定实现、为什么行归属在 apply 时就能看见、认领表测试钩子：[docs/CONTRACT.md](docs/CONTRACT.md) 第 6 节。
+
+### 3.11 提醒与花费（observe 组件）
+
+第五个组件行承载两个浏览器端功能，两者都不改变实例状态：任务完成铃声、每轮回复下方的花费估算。
+
+- **host 端只有一条只读探针** `GET /api/agent-control/observe/status`：没有 POST 路由、没有请求体、没有模型工具。探针只用来让客户端在挂载时判断这一行开没开（3.10）。
+- **完成铃声**订阅 `uiSession.sessionStatus`，判据是 `running` 的 **true → false 边沿**：首次快照（页面刚打开）不算完成，重复快照也不会重复响；子代理会话不响；提醒范围可以限定为「仅当前会话」。一次快照最多响一声。音效（三音 / 单音 / 钟声 / 不响）与音量用 Web Audio 现场合成，不下载音频文件。
+- **浏览器要求页面先被点过一次才允许出声**：音频上下文起不来时铃声静默降级——不抛错、不影响其它功能。
+- **每轮花费**读 Chat 发布在 `conversation.chat.turnTail` 槽位上的 `turn-tail.tokenUsage`（`uncachedInputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `outputTokens` 与 `routes`），乘一份价目表；金额显示在每轮回复下方（小于 1 元保留四位，例如 `¥0.0061`）。拿不到用量、或模型不在价目表里 → 显示「—」，不猜价格。
+- **峰谷按北京时间工作日判定**：周一至周五 09:00–12:00、14:00–18:00 是高峰，其余时段（含周末）按空闲价。**节假日没有公开的机器可读日历，按工作日算**，所以节假日会高估一倍；时区信息拿不到时也按高峰（高估）。宁可高估也不要低估。
+- **价目表**：内置 DeepSeek 官方公开价（每百万 token）：`deepseek-flash` 高峰 输入 2 / 缓存命中 0.04 / 输出 8，空闲减半；`deepseek-v4-pro` 高峰 9 / 0.3 / 27，空闲减半。`cacheWrite` 记 0（DeepSeek 不报告这一桶）。设置页可以用 JSON 按 `provider/model` 覆盖或补充；未知模型显示「—」。
+- **金额是估算，不是账单**：多路由的一轮按第一个路由估算；官方价格会变，内置表只是默认值。README 与界面文案都必须这么写。
+- **设置只存浏览器 localStorage**（键 `dsh-agent-control:observe`），不进 profile、不落文件——插件仍然只有「会话日志」这一份持久事实（3.8）。换浏览器或清站点数据就回到默认值。
+- 客户端两个槽位：`conversation.chat.turnTail` 的第二个条目（每轮花费徽章，order 100，紧跟「已删轮次」隐藏标记）与 `settings.section` 的第二行（「提醒与花费」一节，order 510，紧跟热重启那一节）。两者都在探到 observe 行可用之后才注册。
+- 关掉 observe 行 = 不订阅铃声、不注册这两个槽位；会话与轮次删除、热重启都不受影响。
 
 ## 4. 与 DSH 版本的耦合点
 
@@ -208,7 +225,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 2. id 的两种拼写每一步都要认。只认一种就会「删了又回来」，或让另一种拼写绕过闸门（坑 ①）。
 3. 别把所有非预期异常都归成 `AGENT_BUSY`。内部故障要原样暴露成 `DELETE_FAILED`，否则每次兼容性失败都显示成「任务正在运行」。
 
-还要盯的耦合面，换版本时逐条实测：会话目录形状与两种拼写；`surfaceOp` 字段名与 `sourceEventSeqs` 的适用类型；压缩与投影（已压缩的轮次必须判 `TURN_COMPACTED`）；`runMaintenance` 的租约语义；文件删除是否受沙箱约束（会话目录在 `$DSH_HOME` 下、不在工作区内，策略解析必须带作用域）；服务签名漂移。
+还要盯的耦合面，换版本时逐条实测：会话目录形状与两种拼写；`surfaceOp` 字段名与 `sourceEventSeqs` 的适用类型；压缩与投影（已压缩的轮次必须判 `TURN_COMPACTED`）；`runMaintenance` 的租约语义；文件删除是否受沙箱约束（会话目录在 `$DSH_HOME` 下、不在工作区内，策略解析必须带作用域）；服务签名漂移。浏览器端（observe）另盯两处：`uiSession.sessionStatus` 的快照 / 订阅方法、`turn-tail.tokenUsage` 的字段名——换版本时在活页面上核对，不要照抄文档（3.11）。
 
 ## 5. 开发环境
 
@@ -337,6 +354,6 @@ dsh plugin --profile <profile 名> add link:<本地 clone 路径>               
 | 第 9 节「改完自检清单」 | §9「改完自检清单」；热重启那份在 [docs/CONTRACT.md](docs/CONTRACT.md) 第 5 节 |
 | 第 10 节「分支开发流程」 | §6（摘要）+ [docs/RELEASING.md](docs/RELEASING.md)（全文） |
 | 第 11 节「版本号规范」 | §6 |
-| 3.1–3.10 | §3 同名小节，全文在 [docs/CONTRACT.md](docs/CONTRACT.md) |
+| 3.1–3.11 | §3 同名小节，全文在 [docs/CONTRACT.md](docs/CONTRACT.md) |
 | 旧 3.x 子标题 | 「幽灵会话」→ §3.1；「让那一行真的消失：借归档当临时遮盖」→ §3.1 与 [docs/PITFALLS.md](docs/PITFALLS.md) 第 2 节；「怎么证明上面这些真的发生了」→ §3.6；「X.Y.Z 的含义」→ §6 |
 | 「坑 ①–⑪」 | [docs/PITFALLS.md](docs/PITFALLS.md) 第 1 节，编号没改 |

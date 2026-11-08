@@ -16,6 +16,8 @@ GET  /api/agent-control/session/status         # { ok: true, enabled: true } —
 POST /api/agent-control/session/delete         # { sessionId }
 POST /api/agent-control/turn/delete            # { sessionId, assistantMessageId }
 GET  /api/agent-control/turn/status            # 「轮次」组件的只读探针（同上）
+GET  /api/agent-control/observe/status         # 「提醒与花费」组件的只读探针（同上）；这一行在 host 端**只有这一条路由**
+                                               # 没有 POST、没有请求体、没有模型工具——两个功能都在浏览器里（第 6 节）
 GET  /api/agent-control/restart/status         # { ok, bootId, pid, startedAt, port, canRestart, unsupportedReason?,
                                                #   blockers: { sessions: [...], jobs: number }, pending, last }
                                                # 热重启：**同时是辅助进程的就绪探针**，所以它必须允许无凭据访问；
@@ -74,7 +76,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 
 ## 4. 数据与运行环境（AGENTS.md 3.8）
 
-**这个插件自己不落任何数据文件**：没有配置、没有审计日志、没有缓存。唯一的持久事实是它写进会话日志的**墓碑**，那份数据归会话自己所有。删除操作的可观测性靠 harness 日志与接口响应，不要为了「看着专业」造一份本地流水。
+**这个插件自己不落任何数据文件**：没有配置、没有审计日志、没有缓存。唯一的持久事实是它写进会话日志的**墓碑**，那份数据归会话自己所有。删除操作的可观测性靠 harness 日志与接口响应，不要为了「看着专业」造一份本地流水。**唯一的例外在浏览器里**：observe 组件的设置（铃声、音量、范围、花费开关、自定义价目表）键在 `localStorage` 的 `dsh-agent-control:observe` 下——它属于那个浏览器，不进 profile、不写磁盘文件，换浏览器就回到默认值（第 6 节）。
 
 **唯一的受控例外：热重启的交接文件**（`<DSH_HOME>/agent-control/restart/`）。理由是这个功能**必须跨进程边界传递状态**——旧进程在退出前要把「重启后该做什么」交给一个还不存在的新进程，除了磁盘没有别的通道：
 
@@ -139,14 +141,14 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 
 ## 6. 组件级开关（AGENTS.md 3.10）
 
-插件列表里本插件下有**四行**：core（`agent-control`）+ 三个组件行（`agent-control-session` /
-`-turn` / `-restart`）。每一行是 `cordis.patch.yml` 的 `insert:` 里一个 entry；右侧的开关调用宿主的
+插件列表里本插件下有**五行**：core（`agent-control`）+ 四个组件行（`agent-control-session` /
+`-turn` / `-restart` / `-observe`）。每一行是 `cordis.patch.yml` 的 `insert:` 里一个 entry；右侧的开关调用宿主的
 `pluginManager/setPluginEnabled(entryId, enabled)`：宿主把那一行标成 `disabled` 写进 **profile 的 patch**，
 **重启实例后**生效。
 
 **关键：被禁用的行，loader 根本不会调用它的 `apply`。**（`cordis-plugin-loader` 的 `Entry.update`：
 `if (this.disabled) { this.fiber?.dispose(); return }`；`Entry.disabled` 连祖先组一起算。）所以「关掉一个组件」
-= 那一行的接线从来不执行，而不是「装上了再关」——这也意味着：**主入口不能无条件把三个组件都装上**，
+= 那一行的接线从来不执行，而不是「装上了再关」——这也意味着：**主入口不能无条件把四个组件都装上**，
 否则关掉子行完全不起作用（路由还在、界面照样显示入口）。
 
 于是「谁负责注册」只有一条规则：
@@ -162,10 +164,11 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
   `entry.options.name`。判据是**行存不存在**，不看它开没开（开着的行自己会装；关掉的行走不到 `apply`）。
   **拿不到 loader 服务时返回 false**（= 照旧全装）：这是保守的一侧——查不到行的信息不该让全部功能消失。
   - 为什么这条判定及时：patch 是**一次性**合并成一个 entry 列表再 `root.update(...)` 的
-    （`dsh-app-boot` 的 `applyEntryPatches` → `EntryGroup.update`，四个 entry 在同一个 tick 里进入 loader 的
+    （`dsh-app-boot` 的 `applyEntryPatches` → `EntryGroup.update`，五个 entry 在同一个 tick 里进入 loader 的
     `store`），所以主入口 apply 时兄弟们已经在树上了。
-- 三个组件的接线**只有一份实现**（`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` /
-  `applyRestartFeature`）：主入口与三个子插件行调用的是同一份，子插件各自只调用自己那一个。
+- 四个组件的接线**只有一份实现**（`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` /
+  `applyRestartFeature` / `applyObserveFeature`）：主入口与四个子插件行调用的是同一份，子插件各自只调用自己那一个。
+  `applyObserveFeature` 只注册一条只读探针，其余全在浏览器里（见本节末尾「observe 行」）。
 - **认领表**（`claimFeature`）挡住同一进程里的重复注册：`webServer.register` 对同一个 `(kind, path)`
   会抛错，工具也不该注册两次。先到先得、后到的跳过（只在 debug / info 级留一行线索），认领在
   `ctx.effect` 的清理里释放，所以热重载后还能注册回去。离线测试用
@@ -174,13 +177,24 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
   这时直接返回——不注册路由、不注册工具、不订阅事件、也不抛错（关掉一个组件不该让实例起不来）。
   两条路都通：宿主开关写行级 `disabled`（loader 不 apply），手写 `config.enabled: false`（apply 立刻返回）。
 - **客户端靠探针判断「组件在不在」**：每个组件在自己的路由命名空间下有一条只读探针
-  （`GET /api/agent-control/session/status`、`.../turn/status`；热重启复用已有的 `GET /restart/status`），
+  （`GET /api/agent-control/session/status`、`.../turn/status`、`.../observe/status`；热重启复用已有的 `GET /restart/status`），
   返回 `{ ok: true, enabled: true }`。客户端在挂载时各拉一次，**先探测、后注册**（槽位一旦注册就不能在
   运行中卸载），探不到（404 / 鉴权 fallback / 超时）就不注册对应的槽位内容；方向是安全的那一侧——
   宁可少显示一个按钮，也不留一个点了报错的按钮。排障抓手 `window.__dshAgentControl.features()`
   给出这次探测到的开关（`true` / `false` / `null`）。
 - ⚠️ **别改主行的 id / name**（`agent-control` / `dsh-agent-control`）：宿主开关是按 id（+name）往 profile 的
   patch 里写覆盖行的，改名会让升级后的旧行失配（第 4 节）。
+
+### observe 行（提醒与花费）
+
+四个组件行里唯一一个**没有状态变更路由**的：它承载两个浏览器端功能（任务完成铃声、每轮回复下方的花费估算），host 端只有一条只读探针 `GET /api/agent-control/observe/status`，返回 `{ ok: true, enabled: true }`。
+
+- **没有 POST、没有请求体、没有模型工具**：整行不参与删除与重启那套确认、错误码与可信校验——那几个机制是给破坏性操作用的，这里的两个功能只读。
+- **客户端两个槽位**：`conversation.chat.turnTail` 的第二个条目（`id: agent-control-turn-cost`，`order: 100`；第一个是轮次组件的已删轮次隐藏标记，`order: 90`）与 `settings.section` 的第二行（`id: agent-control-observe`，`order: 510`；第一行是热重启的 `order: 500`）。两者都在探到 `GET /observe/status` 可用之后才注册（先探测、后注册；槽位一旦注册无法在运行中卸载）。
+- **设置只存 `localStorage`**（键 `dsh-agent-control:observe`）：插件仍然不落数据文件；关掉组件只是不订阅、不注册，不清那份设置。
+- **数据来源**：完成铃声订阅 `uiSession.sessionStatus`，用 `running` 的 true → false 边沿判定（首次快照与重复快照都不响，子代理会话不响）；花费读 Chat 发布在 `conversation.chat.turnTail` 的 `turn-tail.tokenUsage`（`uncachedInputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `outputTokens` 与 `routes`）。两者都是宿主公开面，但字段名要在活页面核对。
+- **金额是估算**：价目表内置 DeepSeek 公开价（高峰 / 空闲两档），峰谷按北京时间工作日 09:00–12:00、14:00–18:00 判定；节假日按工作日算（会高估）；未知模型显示「—」。它是**估算**，不是账单——README 与界面文案都必须这么写。
+- **音频需要一次用户手势**：没有用户手势时音频上下文起不来，铃声静默降级。
 
 ## 7. 本地联调与 profile 装/摘（AGENTS.md 第 5 节）
 
