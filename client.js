@@ -36,6 +36,8 @@
     turn: '/api/agent-control/turn/status',
     // 热重启复用已有的状态接口（它本来就是辅助进程的就绪探针），不再多开一条路由。
     restart: '/api/agent-control/restart/status',
+    // 提醒与花费：host 端只有这一条只读探针，铃声与金额都在浏览器里算。
+    observe: '/api/agent-control/observe/status',
   }
   /**
    * 探测的超时上限。
@@ -89,6 +91,470 @@
    * 「自上而下卷起来」。
    */
   const TURN_FADE_STAGGER_MS = 50
+
+  // ---------------------------------------------------------------------------
+  // 「提醒与花费」（observe 组件）
+  //
+  // 两个功能都只发生在浏览器里：完成铃声靠 `uiSession.sessionStatus` 的 running 边沿，
+  // 每轮花费靠 Chat 已经算好的 `turn-tail.tokenUsage`（精确的 provider 用量）乘一份价目表。
+  // host 端只有一条只读探针，没有请求体、没有模型工具，所以这里不需要任何新的 HTTP 交互。
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 设置存浏览器 localStorage，不进 profile、不写任何文件：插件仍然只有「会话日志」这一份
+   * 持久事实。换浏览器或清掉站点数据会回到默认值；设置页里每改一项即刻生效。
+   */
+  const OBSERVE_PREFS_KEY = 'dsh-agent-control:observe'
+  /** 设置变化广播：设置页与铃声监听读的是同一份模块级快照。 */
+  const OBSERVE_PREFS_EVENT = 'dsh-agent-control:observe-prefs'
+  /** 完成铃声的可选音效（`none` = 不响）。全部用 Web Audio 现场合成，不带任何音频资源。 */
+  const OBSERVE_SOUNDS = ['chime', 'ding', 'bell', 'none']
+  /** 默认设置：开铃、三音、60% 音量、所有会话的完成都提醒、显示每轮花费。 */
+  const DEFAULT_OBSERVE_PREFS = {
+    chime: true,
+    sound: 'chime',
+    volume: 0.6,
+    /** `all` = 任何会话完成都响；`current` = 只响当前正在看的那个会话。 */
+    scope: 'all',
+    cost: true,
+    /** 自定义价目表（按 `provider/model` 覆盖内置表）；`null` = 只用内置表。 */
+    pricing: null,
+  }
+
+  /**
+   * 三个合成音效的音高与包络（单位：赫兹 / 秒）。
+   *
+   * 用固定音高而不是从资源文件解码：插件没有静态资源目录，音频文件会随 `files` 一起发布、
+   * 还要处理 MIME 与缓存，成本远大于收益。合成音在任何浏览器里都能出声，也能按音量缩放。
+   */
+  const SOUND_TONES = {
+    chime: [
+      { frequency: 523.25, at: 0, duration: 0.16, gain: 0.6 },
+      { frequency: 659.25, at: 0.1, duration: 0.18, gain: 0.6 },
+      { frequency: 783.99, at: 0.2, duration: 0.34, gain: 0.55 },
+    ],
+    ding: [{ frequency: 880, at: 0, duration: 0.5, gain: 0.5 }],
+    bell: [
+      { frequency: 1046.5, at: 0, duration: 1.2, gain: 0.5 },
+      { frequency: 1568, at: 0, duration: 0.9, gain: 0.18 },
+      { frequency: 2093, at: 0, duration: 0.6, gain: 0.1 },
+    ],
+  }
+
+  /** 金额折算的基数：价目表里的单价都是「每百万 token」。 */
+  const PRICE_UNIT = 1_000_000
+
+  /**
+   * 内置价目表：每百万 token 的人民币单价，按 `provider/model` 精确匹配。
+   *
+   * 数值抄自 DeepSeek 官方《模型 & 价格》（2026-11 抓取）：
+   * deepseek-flash 高峰时段输入（缓存命中）0.04、输入（未命中）2、输出 8；空闲时段全部减半；
+   * deepseek-v4-pro 高峰 0.30 / 9.0 / 27.0，空闲减半。DeepSeek 不报告缓存写 token，
+   * 所以 `cacheWrite` 记 0；其它 provider 若报告了这一桶，可在设置页用自定义价目表覆盖。
+   *
+   * **价格会变**：这里只是默认值。未知模型一律显示「—」，不猜价格；金额也都标成估算。
+   */
+  const BUILTIN_PRICING = {
+    'deepseek-official/deepseek-flash': {
+      currency: 'CNY',
+      peak: { input: 2, cacheRead: 0.04, cacheWrite: 0, output: 8 },
+      offPeak: { input: 1, cacheRead: 0.02, cacheWrite: 0, output: 4 },
+    },
+    'deepseek-official/deepseek-v4-pro': {
+      currency: 'CNY',
+      peak: { input: 9, cacheRead: 0.3, cacheWrite: 0, output: 27 },
+      offPeak: { input: 4.5, cacheRead: 0.15, cacheWrite: 0, output: 13.5 },
+    },
+  }
+
+  /** 设置页里那套控件与花费徽章的样式类（追加进 STYLE_CSS）。 */
+  const COST_CLASS = 'dsh-agent-control-cost'
+  const OBSERVE_CONTROL_CLASS = 'dsh-agent-control-observe-control'
+  const OBSERVE_VALUE_CLASS = 'dsh-agent-control-observe-value'
+  const OBSERVE_SELECT_CLASS = 'dsh-agent-control-observe-select'
+  const OBSERVE_PRICING_CLASS = 'dsh-agent-control-observe-pricing'
+  const OBSERVE_TEXTAREA_CLASS = 'dsh-agent-control-observe-textarea'
+
+  /** 模块级设置快照：第一次读时从 localStorage 解析，之后靠 `saveObservePrefs` 更新。 */
+  let observePrefsCache
+
+  /**
+   * 这一轮按高峰价还是空闲价算。
+   *
+   * DeepSeek 官方的口径：北京时间周一至周五（不含法定节假日）09:00–12:00 与 14:00–18:00
+   * 是高峰，其余时段（含周末）是空闲。**节假日没有公开的机器可读日历**，这里按工作日算，
+   * 所以节假日的花费会被高估一倍——宁可高估也不要低估。
+   *
+   * @param {number} [timestampMs] - 该轮结束时间；拿不到就用当前时间。
+   * @returns {boolean} 高峰时段为 true；时区信息拿不到时也按高峰处理（高估）。
+   */
+  function isPeakPricingTime(timestampMs) {
+    const time = Number.isFinite(timestampMs) ? timestampMs : Date.now()
+    try {
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Shanghai',
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      })
+      const parts = formatter.formatToParts(new Date(time))
+      const pick = (type) => parts.find((part) => part.type === type)?.value
+      const weekday = pick('weekday')
+      const hour = Number(pick('hour'))
+      const minute = Number(pick('minute'))
+      if (!Number.isInteger(hour) || !Number.isInteger(minute)) return true
+      if (weekday === 'Sat' || weekday === 'Sun') return false
+      const minutes = hour * 60 + minute
+      return (minutes >= 9 * 60 && minutes < 12 * 60) || (minutes >= 14 * 60 && minutes < 18 * 60)
+    } catch {
+      return true
+    }
+  }
+
+  /** 把用户填的价目表规范化成 `{ currency, peak, offPeak }`；坏字段回落到 `fallback`。 */
+  function normalizePriceBand(band, fallback) {
+    const source = band !== null && typeof band === 'object' ? band : {}
+    const read = (key) => {
+      const value = Number(source[key])
+      return Number.isFinite(value) && value >= 0 ? value : fallback[key]
+    }
+    return {
+      input: read('input'),
+      cacheRead: read('cacheRead'),
+      cacheWrite: read('cacheWrite'),
+      output: read('output'),
+    }
+  }
+
+  /** 当前生效的价目表：内置表 + 设置里的自定义覆盖（按 `provider/model` 整条覆盖）。 */
+  function observePricingTable() {
+    const table = {}
+    for (const [key, entry] of Object.entries(BUILTIN_PRICING)) table[key] = { ...entry }
+    const custom = getObservePrefs().pricing
+    if (custom === null || typeof custom !== 'object') return table
+    for (const [key, entry] of Object.entries(custom)) {
+      if (typeof key !== 'string' || key === '') continue
+      if (entry === null || typeof entry !== 'object') continue
+      const base = table[key] ?? {
+        currency: 'CNY',
+        peak: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+        offPeak: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+      }
+      table[key] = {
+        currency: typeof entry.currency === 'string' ? entry.currency : base.currency,
+        // 允许只写一份扁平单价：它同时当高峰价用，空闲价沿用基表。
+        peak: normalizePriceBand(entry.peak ?? entry, base.peak),
+        offPeak: normalizePriceBand(entry.offPeak ?? entry, base.offPeak),
+      }
+    }
+    return table
+  }
+
+  /** 把一轮的 token 用量折算成金额（纯函数，离线测试直接调）。 */
+  function computeTurnCost(usage, options = {}) {
+    if (usage === null || typeof usage !== 'object') return null
+    const count = (value) => (Number.isFinite(value) && value > 0 ? value : 0)
+    const buckets = {
+      uncachedInput: count(usage.uncachedInputTokens),
+      cacheRead: count(usage.cacheReadTokens),
+      cacheWrite: count(usage.cacheWriteTokens),
+      output: count(usage.outputTokens),
+    }
+    const routes = Array.isArray(usage.routes)
+      ? usage.routes.filter((route) => route !== null && typeof route === 'object')
+      : []
+    const route = routes.length > 0
+      ? { provider: String(routes[0].provider ?? ''), model: String(routes[0].model ?? '') }
+      : null
+    const table = options.table ?? observePricingTable()
+    const entry = route === null ? undefined : table[`${route.provider}/${route.model}`]
+    const peak = options.peak ?? isPeakPricingTime(options.time)
+    if (entry === undefined) {
+      return { known: false, route, routeCount: routes.length, peak, buckets, usage }
+    }
+    const band = peak ? entry.peak : entry.offPeak
+    const cost = (buckets.uncachedInput * band.input
+      + buckets.cacheRead * band.cacheRead
+      + buckets.cacheWrite * band.cacheWrite
+      + buckets.output * band.output) / PRICE_UNIT
+    return {
+      known: true,
+      route,
+      routeCount: routes.length,
+      peak,
+      buckets,
+      band,
+      currency: entry.currency ?? 'CNY',
+      cost,
+      usage,
+    }
+  }
+
+  /** 金额文案：小于 1 元保留四位，大于等于 1 元保留两位，极小的金额不写成 0。 */
+  function formatCost(cost, currency = 'CNY') {
+    const symbol = currency === 'USD' ? '$' : (currency === 'CNY' ? '¥' : `${currency} `)
+    const value = Number.isFinite(cost) && cost > 0 ? cost : 0
+    if (value === 0) return `${symbol}0`
+    if (value < 0.00005) return `<${symbol}0.0001`
+    if (value < 1) return `${symbol}${value.toFixed(4)}`
+    return `${symbol}${value.toFixed(2)}`
+  }
+
+  /** 一轮花费的明细文案（放在原生 `title` 里，多行用换行分隔）。 */
+  function describeTurnCost(result, t = translate) {
+    if (result === null) return ''
+    const lines = []
+    if (result.known !== true) {
+      lines.push(t('observe.cost.unknown'))
+      if (result.route !== null) lines.push(`${result.route.provider}/${result.route.model}`)
+      return lines.join('\n')
+    }
+    if (result.routeCount > 1) lines.push(t('observe.cost.mixedRoutes'))
+    const band = result.band
+    const money = (value, price) => `${value} × ${symbolOf(result.currency)}${price}/M`
+    lines.push(`${t('observe.cost.uncachedInput')}: ${money(result.buckets.uncachedInput, band.input)}`)
+    lines.push(`${t('observe.cost.cacheRead')}: ${money(result.buckets.cacheRead, band.cacheRead)}`)
+    if (result.buckets.cacheWrite > 0) {
+      lines.push(`${t('observe.cost.cacheWrite')}: ${money(result.buckets.cacheWrite, band.cacheWrite)}`)
+    }
+    lines.push(`${t('observe.cost.output')}: ${money(result.buckets.output, band.output)}`)
+    lines.push(`${t('observe.cost.total')}: ${formatCost(result.cost, result.currency)}`)
+    lines.push(result.peak ? t('observe.cost.peak') : t('observe.cost.offPeak'))
+    return lines.join('\n')
+  }
+
+  /** 币种符号（与 `formatCost` 同一套规则）。 */
+  function symbolOf(currency) {
+    if (currency === 'USD') return '$'
+    if (currency === 'CNY' || currency === undefined) return '¥'
+    return `${currency} `
+  }
+
+  /** 规范化一份设置（坏值一律回落到默认值，不抛）。 */
+  function normalizeObservePrefs(raw) {
+    const source = raw !== null && typeof raw === 'object' ? raw : {}
+    const sound = OBSERVE_SOUNDS.includes(source.sound) ? source.sound : DEFAULT_OBSERVE_PREFS.sound
+    const volume = Number(source.volume)
+    return {
+      chime: source.chime !== false,
+      sound,
+      volume: Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : DEFAULT_OBSERVE_PREFS.volume,
+      scope: source.scope === 'current' ? 'current' : 'all',
+      cost: source.cost !== false,
+      pricing: source.pricing !== null && typeof source.pricing === 'object' && !Array.isArray(source.pricing)
+        ? source.pricing
+        : null,
+    }
+  }
+
+  /** 把自定义价目表格式化进设置页的文本框；没有自定义时是空串。 */
+  function formatPricingDraft(pricing) {
+    if (pricing === null || typeof pricing !== 'object' || Array.isArray(pricing)) return ''
+    try {
+      return JSON.stringify(pricing, null, 2)
+    } catch {
+      return ''
+    }
+  }
+
+  /** 读设置：第一次从 localStorage 解析，之后读模块级快照。 */
+  function getObservePrefs() {
+    if (observePrefsCache !== undefined) return observePrefsCache
+    let parsed
+    try {
+      // 走 window.localStorage 而不是 globalThis.localStorage：Node 的全局 localStorage 访问
+      // 会打一条实验性警告（本机离线测试里就出现过），窗口对象上没有它时干脆什么都不读。
+      const raw = globalThis.window?.localStorage?.getItem?.(OBSERVE_PREFS_KEY)
+      parsed = typeof raw === 'string' && raw !== '' ? JSON.parse(raw) : undefined
+    } catch {
+      parsed = undefined
+    }
+    observePrefsCache = normalizeObservePrefs(parsed)
+    return observePrefsCache
+  }
+
+  /** 改一份设置：合并 → 缓存 → 写 localStorage → 广播。写失败只影响持久化，不影响当前页面。 */
+  function saveObservePrefs(patch) {
+    observePrefsCache = normalizeObservePrefs({ ...getObservePrefs(), ...patch })
+    try {
+      globalThis.window?.localStorage?.setItem?.(OBSERVE_PREFS_KEY, JSON.stringify(observePrefsCache))
+    } catch {
+      // 隐私模式 / 配额满：这次改动在当前页面照样生效，只是刷新后回到默认值。
+    }
+    try {
+      window.dispatchEvent?.(new CustomEvent(OBSERVE_PREFS_EVENT))
+    } catch {
+      // 没有 window（离线测试）时不需要广播。
+    }
+    return observePrefsCache
+  }
+
+  /** 已经真正发出声的次数（排障与真机验证用：能据此判断「完成边沿确实触发了播放」）。 */
+  let observeChimeCount = 0
+
+  /** 浏览器端的 AudioContext（只建一次；拿不到音频能力时返回 null）。 */
+  let observeAudioContext
+  function ensureAudioContext() {
+    if (observeAudioContext !== undefined) return observeAudioContext
+    const Ctor = globalThis.AudioContext ?? globalThis.webkitAudioContext
+    if (typeof Ctor !== 'function') {
+      observeAudioContext = null
+      return observeAudioContext
+    }
+    try {
+      observeAudioContext = new Ctor()
+    } catch {
+      observeAudioContext = null
+    }
+    return observeAudioContext
+  }
+
+  /** 恢复被浏览器挂起的音频上下文（自动播放策略；拿不到就静默放弃）。 */
+  function resumeAudio(engine) {
+    try {
+      if (engine !== null && engine.state === 'suspended' && typeof engine.resume === 'function') {
+        const resumed = engine.resume()
+        if (resumed !== null && typeof resumed === 'object' && typeof resumed.catch === 'function') {
+          resumed.catch(() => {})
+        }
+      }
+    } catch {
+      // 恢复失败只意味着这次没声音。
+    }
+  }
+
+  /** 按预设合成一次提示音。返回是否真的发出了声。 */
+  function playCompletionChime(sound, volume) {
+    const tones = SOUND_TONES[sound]
+    if (tones === undefined) return false
+    const engine = ensureAudioContext()
+    if (engine === null) return false
+    try {
+      resumeAudio(engine)
+      const master = engine.createGain()
+      master.gain.value = Math.min(1, Math.max(0, Number.isFinite(volume) ? volume : DEFAULT_OBSERVE_PREFS.volume))
+      master.connect(engine.destination)
+      const start = engine.currentTime + 0.02
+      for (const tone of tones) {
+        const oscillator = engine.createOscillator()
+        const envelope = engine.createGain()
+        oscillator.type = sound === 'bell' ? 'sine' : 'triangle'
+        oscillator.frequency.value = tone.frequency
+        const toneStart = start + tone.at
+        envelope.gain.setValueAtTime(0.0001, toneStart)
+        envelope.gain.exponentialRampToValueAtTime(Math.max(0.0002, tone.gain), toneStart + 0.012)
+        envelope.gain.exponentialRampToValueAtTime(0.0001, toneStart + tone.duration)
+        oscillator.connect(envelope)
+        envelope.connect(master)
+        oscillator.start(toneStart)
+        oscillator.stop(toneStart + tone.duration + 0.02)
+      }
+      observeChimeCount += 1
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 浏览器要求先有用户手势才允许出声：第一次点按 / 按键时把 AudioContext 建好并恢复。 */
+  function armAudioUnlock() {
+    if (typeof document === 'undefined' || document === null) return
+    const unlock = () => {
+      try {
+        resumeAudio(ensureAudioContext())
+      } catch {
+        // 拿不到音频能力时静默降级：铃声不响不该影响别的功能。
+      }
+      document.removeEventListener?.('pointerdown', unlock, true)
+      document.removeEventListener?.('keydown', unlock, true)
+    }
+    document.addEventListener?.('pointerdown', unlock, true)
+    document.addEventListener?.('keydown', unlock, true)
+  }
+
+  /** 这个会话是不是子代理会话（子代理完成不响铃：它们通常由另一个任务触发，响了反而吵）。 */
+  function isSubagentSession(sessionId) {
+    try {
+      const list = sessionsService?.list?.getSnapshot?.()
+      return list?.byId?.[sessionId]?.origin === 'subagent'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 从会话状态快照里找出「刚刚完成任务」的会话并响铃。
+   *
+   * 判据是 `running` 的 true → false 边沿：只有**之前确实在跑**的会话才算完成，
+   * 首次快照（页面刚打开）不会被误当成完成。一次快照最多响一声。
+   */
+  function notifyCompletedSessions(previous, next) {
+    if (next === null || typeof next !== 'object' || typeof next.forEach !== 'function') return
+    const prefs = getObservePrefs()
+    if (prefs.chime !== true || prefs.sound === 'none') return
+    let played = false
+    next.forEach((status, sessionId) => {
+      if (played) return
+      const before = typeof previous?.get === 'function' ? previous.get(sessionId) : undefined
+      if (before?.running !== true || status?.running !== false) return
+      if (prefs.scope === 'current' && !isMainViewSession(sessionId)) return
+      if (isSubagentSession(sessionId)) return
+      played = playCompletionChime(prefs.sound, prefs.volume)
+    })
+  }
+
+  /**
+   * 装提醒运行时：订阅 `uiSession.sessionStatus`，在完成边沿响铃。
+   *
+   * 服务可能在 apply 时还没就绪（客户端的装配顺序不保证），所以先 `get` 一次、拿不到再 `inject`。
+   * 订阅挂在 `ctx.effect` 上，组件被关掉或页面卸载时自动注销。
+   */
+  function attachObserveRuntime(ctx) {
+    const start = (service) => {
+      const source = service?.sessionStatus
+      if (source === null || typeof source !== 'object') return
+      if (typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') return
+      let previous = source.getSnapshot()
+      const onStatus = () => {
+        const next = source.getSnapshot()
+        try {
+          notifyCompletedSessions(previous, next)
+        } catch {
+          // 提醒失败只影响提醒本身，绝不冒泡到会话状态订阅方。
+        }
+        previous = next
+      }
+      const unsubscribe = source.subscribe(onStatus)
+      if (typeof unsubscribe === 'function' && typeof ctx.effect === 'function') {
+        ctx.effect(() => () => { unsubscribe() }, `${PLUGIN_ID}: 完成提醒`)
+      }
+    }
+    const existing = typeof ctx.get === 'function' ? ctx.get('uiSession') : undefined
+    if (existing !== undefined) {
+      start(existing)
+      return
+    }
+    if (typeof ctx.inject === 'function') ctx.inject(['uiSession'], (sub) => start(sub?.uiSession))
+  }
+
+  /** 读 Chat 发布到这一轮身上的 `turn-tail` 数据（拿不到就是 undefined，绝不抛）。 */
+  function readTurnTail(turn) {
+    try {
+      return turn?.data?.get?.('turn-tail')
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 订阅 `turn-tail` 数据的身份稳定源；没有这个接口时返回 undefined（组件退化为只读一次）。 */
+  function readTurnTailSource(turn) {
+    try {
+      return turn?.data?.source?.('turn-tail')
+    } catch {
+      return undefined
+    }
+  }
 
   /**
    * 重启进度态机的全部阶段（见 `nextRestartPhase`）。
@@ -169,6 +635,9 @@
     turnMarker: 'agent-control-turn-marker',
     dialog: 'agent-control-dialog',
     restartSection: 'agent-control-restart',
+    // 提醒与花费（observe 组件）的两个条目：每轮花费徽章 + 设置页那一节。
+    turnCost: 'agent-control-turn-cost',
+    observeSection: 'agent-control-observe',
   }
 
   /**
@@ -337,6 +806,28 @@
       + 'font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}',
     `.${INFO_FOOTER_CLASS}{display:flex;align-items:center;justify-content:flex-end;gap:8px;`
       + 'padding:0 24px}',
+    // ---------------------------------------------------------------------
+    // 提醒与花费（observe 组件）。两个功能都只在浏览器里：花费徽章挂在轮次尾部，
+    // 设置页那几行沿用本文件已有的 ROW/SECTION 类；颜色一律走 token，明暗主题自动成立。
+    // ---------------------------------------------------------------------
+    '`.${COST_CLASS}{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;padding:2px 6px;'
+      + 'border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);'
+      + 'border:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);'
+      + 'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;white-space:nowrap}`',
+    '`.${COST_CLASS}[data-agent-control-turn-cost="unknown"]{opacity:.7}`',
+    '`.${OBSERVE_CONTROL_CLASS}{display:flex;align-items:center;gap:10px;flex:none}`',
+    '`.${OBSERVE_VALUE_CLASS}{color:var(--dsw-alias-label-secondary);min-width:38px;text-align:right;'
+      + 'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}`',
+    '`.${OBSERVE_SELECT_CLASS}{height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);'
+      + 'border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-primary);'
+      + 'font:inherit;font-size:12px;line-height:18px;outline:none}`',
+    '`.${OBSERVE_SELECT_CLASS}:focus-visible{border-color:var(--dsw-alias-brand-primary)}`',
+    '`.${OBSERVE_PRICING_CLASS}{display:flex;flex-direction:column;gap:6px;flex:none;width:min(360px,100%)}`',
+    '`.${OBSERVE_TEXTAREA_CLASS}{box-sizing:border-box;width:100%;min-height:96px;resize:vertical;'
+      + 'padding:6px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);'
+      + 'background:transparent;color:var(--dsw-alias-label-primary);'
+      + 'font-family:var(--dsw-font-mono, ui-monospace, monospace);font-size:12px;line-height:18px;outline:none}`',
+    '`.${OBSERVE_TEXTAREA_CLASS}:focus-visible{border-color:var(--dsw-alias-brand-primary)}`',
   ].join('')
 
   /** 注入一次样式表；没有 document（离线测试）或已注入时什么都不做。 */
@@ -655,6 +1146,44 @@
     'error.SHUTDOWN_FAILED': '没能关掉这个实例',
     'error.SHUTDOWN_REQUEST_FAILED': '关闭请求没有发出去',
     'error.SHUTDOWN_REQUEST_TIMEOUT': '关闭请求没有得到回应',
+    // --- 提醒与花费（observe 组件）------------------------------------------------------
+    'observe.sectionLabel': '提醒与花费',
+    'observe.title': '提醒与花费',
+    'observe.intro': '说完一轮时用一声提示音告诉你，并在每轮回复下方标出这一轮大概花了多少钱。设置只存在这个浏览器里，不进 profile。',
+    'observe.chime.title': '任务完成时响铃',
+    'observe.chime.desc': '一轮回复结束、会话从运行变为空闲时响一声；页面需要先被点过一次，浏览器才允许出声。',
+    'observe.sound.title': '音效',
+    'observe.sound.desc': '三种现场合成的提示音，不下载任何音频文件。',
+    'observe.sound.chime': '三音',
+    'observe.sound.ding': '单音',
+    'observe.sound.bell': '钟声',
+    'observe.sound.none': '不响',
+    'observe.preview': '试听',
+    'observe.volume.title': '音量',
+    'observe.volume.desc': '0% 等于静音，但开关仍然保持打开。',
+    'observe.scope.title': '提醒范围',
+    'observe.scope.desc': '只提醒你正在看的那个会话，还是任何会话完成都提醒。',
+    'observe.scope.all': '所有会话',
+    'observe.scope.current': '仅当前会话',
+    'observe.cost.title': '每轮显示花费',
+    'observe.cost.desc': '按 token 用量与价目表估算，显示在每轮回复的下方；拿不到用量或价目时显示「—」。',
+    'observe.cost.unknownShort': '—',
+    'observe.cost.unknown': '这一轮没有可用的 token 用量，或者模型不在价目表里',
+    'observe.cost.mixedRoutes': '这一轮跨了多个模型，金额按第一个路由估算',
+    'observe.cost.uncachedInput': '输入（未命中缓存）',
+    'observe.cost.cacheRead': '输入（命中缓存）',
+    'observe.cost.cacheWrite': '输入（写缓存）',
+    'observe.cost.output': '输出',
+    'observe.cost.total': '合计（估算）',
+    'observe.cost.peak': '按高峰时段单价计算',
+    'observe.cost.offPeak': '按空闲时段单价计算',
+    'observe.pricing.title': '价目表',
+    'observe.pricing.desc': '内置 DeepSeek 官方公开价（每百万 token，人民币）并区分高峰与空闲两档；可用 JSON 按 provider/model 覆盖或补充，未知模型一律显示「—」。',
+    'observe.pricing.placeholder': '例如：{"openrouter/anthropic/claude-sonnet-5.5": {"currency": "USD", "peak": {"input": 3, "cacheRead": 0.3, "cacheWrite": 3.75, "output": 15}}}',
+    'observe.pricing.save': '保存价目表',
+    'observe.pricing.reset': '恢复内置价目表',
+    'observe.pricing.saved': '已保存，下一次渲染就生效。',
+    'observe.pricing.invalid': '这不是合法的 JSON 对象，没有保存。',
   }
 
   const en = {
@@ -786,6 +1315,44 @@
     'error.SHUTDOWN_FAILED': 'The instance could not be closed',
     'error.SHUTDOWN_REQUEST_FAILED': 'The shutdown request could not be sent',
     'error.SHUTDOWN_REQUEST_TIMEOUT': 'The shutdown request got no answer',
+    // --- Sounds and per-turn cost (observe component) --------------------------------------
+    'observe.sectionLabel': 'Sounds & cost',
+    'observe.title': 'Sounds & cost',
+    'observe.intro': 'Play a short chime when a turn finishes, and show roughly what that turn cost under each reply. Settings live in this browser only; nothing is written to the profile.',
+    'observe.chime.title': 'Chime when a turn finishes',
+    'observe.chime.desc': 'One short sound when a reply settles and the session goes from running to idle. The page must be clicked once before a browser lets it make any sound.',
+    'observe.sound.title': 'Sound',
+    'observe.sound.desc': 'Three synthesized cues; no audio files are downloaded.',
+    'observe.sound.chime': 'Three tones',
+    'observe.sound.ding': 'Single tone',
+    'observe.sound.bell': 'Bell',
+    'observe.sound.none': 'Silent',
+    'observe.preview': 'Play',
+    'observe.volume.title': 'Volume',
+    'observe.volume.desc': '0% is silent while the switch stays on.',
+    'observe.scope.title': 'Notify for',
+    'observe.scope.desc': 'Only the session you are looking at, or any session that finishes.',
+    'observe.scope.all': 'All sessions',
+    'observe.scope.current': 'Current session only',
+    'observe.cost.title': 'Show per-turn cost',
+    'observe.cost.desc': 'Estimated from token usage and the price table, shown under each reply; shows a dash when usage or pricing is unavailable.',
+    'observe.cost.unknownShort': '—',
+    'observe.cost.unknown': 'No usable token usage for this turn, or the model is not in the price table',
+    'observe.cost.mixedRoutes': 'This turn used several models; the amount is estimated from the first route',
+    'observe.cost.uncachedInput': 'Input (cache miss)',
+    'observe.cost.cacheRead': 'Input (cache hit)',
+    'observe.cost.cacheWrite': 'Input (cache write)',
+    'observe.cost.output': 'Output',
+    'observe.cost.total': 'Total (estimated)',
+    'observe.cost.peak': 'Priced at peak-hour rates',
+    'observe.cost.offPeak': 'Priced at off-peak rates',
+    'observe.pricing.title': 'Price table',
+    'observe.pricing.desc': 'DeepSeek public list prices (per million tokens, CNY) with peak and off-peak bands are built in. Override or extend them by provider/model with JSON; unknown models show a dash.',
+    'observe.pricing.placeholder': 'Example: {"openrouter/anthropic/claude-sonnet-5.5": {"currency": "USD", "peak": {"input": 3, "cacheRead": 0.3, "cacheWrite": 3.75, "output": 15}}}',
+    'observe.pricing.save': 'Save price table',
+    'observe.pricing.reset': 'Restore built-in prices',
+    'observe.pricing.saved': 'Saved; it takes effect on the next render.',
+    'observe.pricing.invalid': 'That is not a valid JSON object, so nothing was saved.',
   }
 
   /** 运行时拿到的服务与依赖（factory 注入）。 */
@@ -815,8 +1382,8 @@ let clientCtx
    *
    * 排障抓手 `window.__dshAgentControl.features()` 读的就是它的只读快照。
    */
-  const featureAvailability = { session: null, turn: null, restart: null }
-  /** 三个探针的合集：只探一次，`apply` 与排障抓手读的是同一份结果。 */
+  const featureAvailability = { session: null, turn: null, restart: null, observe: null }
+  /** 四个探针的合集：只探一次，`apply` 与排障抓手读的是同一份结果。 */
   let featureProbePromise
 
   /** 这一次探测到的组件开关（只读快照，供排障；`null` = 还没探到）。 */
@@ -835,7 +1402,7 @@ let clientCtx
    * 任何异常（网络错误、非 2xx、超时、响应不是 JSON）都记成不可用。结果缓存在
    * `featureProbePromise` 里——`apply` 与排障抓手读的是同一次探测的结果。
    *
-   * @returns {Promise<void>} 三个探针都落定（不会 reject）。
+   * @returns {Promise<void>} 四个探针都落定（不会 reject）。
    */
   function probeFeatures() {
     if (featureProbePromise !== undefined) return featureProbePromise
@@ -1365,6 +1932,15 @@ let clientCtx
       return translate('restart.sectionLabel')
     } catch {
       return '热重启'
+    }
+  }
+
+  /** 「提醒与花费」那一节的页签名（同一个 thunk 约定）。 */
+  function observeSectionLabel() {
+    try {
+      return translate('observe.sectionLabel')
+    } catch {
+      return '提醒与花费'
     }
   }
 
@@ -2493,7 +3069,193 @@ let clientCtx
       )
     }
 
-    return { SessionMenuDelete, TurnDeleteAction, DeletedTurnMarker, RestartSection, OverlayDialogs }
+    /**
+     * 一轮回复下方的「这一轮花了多少钱」。
+     *
+     * 用量来自 Chat 发布在 `turn-tail` 上的精确统计（`deriveTurnTokenUsage`，含路由），
+     * 这里只按价目表折算——拿不到用量就不显示，不猜数字。
+     */
+    const TurnCost = (props) => {
+      const turn = props.turn
+      // 设置直接读模块级快照（不在 state 里缓存一份）：假渲染与真实渲染都拿得到最新值；
+      // 下面那个版本号只负责在设置变化时把真实 React 叫起来重渲染。
+      const [, setPrefsVersion] = useState(0)
+      const [tail, setTail] = useState(() => readTurnTail(turn))
+
+      useEffect(() => {
+        const onPrefs = () => setPrefsVersion((version) => version + 1)
+        window.addEventListener(OBSERVE_PREFS_EVENT, onPrefs)
+        return () => window.removeEventListener(OBSERVE_PREFS_EVENT, onPrefs)
+      }, [])
+
+      useEffect(() => {
+        const source = readTurnTailSource(turn)
+        if (source === undefined) return undefined
+        // 先读一次当前值：挂载之前可能已经发布过，只靠订阅会漏掉这一次。
+        setTail(source.getSnapshot())
+        return typeof source.subscribe === 'function'
+          ? source.subscribe(() => setTail(source.getSnapshot()))
+          : undefined
+      }, [turn])
+
+      if (getObservePrefs().cost !== true) return null
+      const result = computeTurnCost(tail?.tokenUsage)
+      if (result === null) return null
+      const detail = describeTurnCost(result)
+      return react.createElement('span', {
+        className: COST_CLASS,
+        'data-agent-control-turn-cost': result.known ? 'known' : 'unknown',
+        title: detail,
+        'aria-label': detail,
+      }, result.known ? formatCost(result.cost, result.currency) : translate('observe.cost.unknownShort'))
+    }
+
+    /** 设置页「提醒与花费」：铃声、音量、提醒范围、每轮花费开关、自定义价目表。 */
+    const ObserveSection = () => {
+      const t = translate
+      const [prefs, setPrefs] = useState(() => getObservePrefs())
+      const [draft, setDraft] = useState(() => formatPricingDraft(getObservePrefs().pricing))
+      const [pricingError, setPricingError] = useState(null)
+      const [pricingSaved, setPricingSaved] = useState(false)
+
+      useEffect(() => {
+        const onPrefs = () => setPrefs(getObservePrefs())
+        window.addEventListener(OBSERVE_PREFS_EVENT, onPrefs)
+        return () => window.removeEventListener(OBSERVE_PREFS_EVENT, onPrefs)
+      }, [])
+
+      const update = (patch) => setPrefs(saveObservePrefs(patch))
+      const preview = () => playCompletionChime(prefs.sound === 'none' ? 'chime' : prefs.sound, prefs.volume)
+
+      const savePricing = () => {
+        const text = String(draft ?? '').trim()
+        if (text === '') {
+          update({ pricing: null })
+          setPricingError(null)
+          setPricingSaved(true)
+          return
+        }
+        try {
+          const parsed = JSON.parse(text)
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('object required')
+          }
+          update({ pricing: parsed })
+          setPricingError(null)
+          setPricingSaved(true)
+        } catch {
+          setPricingSaved(false)
+          setPricingError(t('observe.pricing.invalid'))
+        }
+      }
+
+      const resetPricing = () => {
+        setDraft('')
+        setPricingError(null)
+        setPricingSaved(false)
+        update({ pricing: null })
+      }
+
+      const row = (key, title, description, control) => react.createElement('div', { className: ROW_CLASS, key },
+        react.createElement('div', { className: ROW_MAIN_CLASS },
+          react.createElement('div', { className: ROW_TITLE_CLASS }, title),
+          react.createElement('div', { className: ROW_DESC_CLASS }, description)),
+        control)
+
+      const soundOptions = OBSERVE_SOUNDS.map((sound) => react.createElement(
+        'option',
+        { value: sound, key: sound },
+        t('observe.sound.' + sound),
+      ))
+
+      const rows = [
+        row('chime', t('observe.chime.title'), t('observe.chime.desc'),
+          react.createElement('label', { className: OBSERVE_CONTROL_CLASS },
+            react.createElement('input', {
+              type: 'checkbox',
+              checked: prefs.chime === true,
+              onChange: (event) => update({ chime: event?.target?.checked === true }),
+            }))),
+        row('sound', t('observe.sound.title'), t('observe.sound.desc'),
+          react.createElement('div', { className: OBSERVE_CONTROL_CLASS },
+            react.createElement('select', {
+              className: OBSERVE_SELECT_CLASS,
+              value: prefs.sound,
+              disabled: prefs.chime !== true,
+              onChange: (event) => update({ sound: event?.target?.value }),
+            }, ...soundOptions),
+            renderButton({
+              key: 'preview',
+              variant: 'outline',
+              size: 'sm',
+              disabled: prefs.chime !== true,
+              onClick: preview,
+              children: t('observe.preview'),
+            }))),
+        row('volume', t('observe.volume.title'), t('observe.volume.desc'),
+          react.createElement('div', { className: OBSERVE_CONTROL_CLASS },
+            react.createElement('input', {
+              type: 'range',
+              min: 0,
+              max: 100,
+              step: 5,
+              value: String(Math.round(prefs.volume * 100)),
+              disabled: prefs.chime !== true,
+              onChange: (event) => update({ volume: Number(event?.target?.value) / 100 }),
+            }),
+            react.createElement('span', { className: OBSERVE_VALUE_CLASS },
+              String(Math.round(prefs.volume * 100)) + '%'))),
+        row('scope', t('observe.scope.title'), t('observe.scope.desc'),
+          react.createElement('select', {
+            className: OBSERVE_SELECT_CLASS,
+            value: prefs.scope,
+            onChange: (event) => update({ scope: event?.target?.value === 'current' ? 'current' : 'all' }),
+          },
+            react.createElement('option', { value: 'all' }, t('observe.scope.all')),
+            react.createElement('option', { value: 'current' }, t('observe.scope.current')))),
+        row('cost', t('observe.cost.title'), t('observe.cost.desc'),
+          react.createElement('label', { className: OBSERVE_CONTROL_CLASS },
+            react.createElement('input', {
+              type: 'checkbox',
+              checked: prefs.cost === true,
+              onChange: (event) => update({ cost: event?.target?.checked === true }),
+            }))),
+        row('pricing', t('observe.pricing.title'), t('observe.pricing.desc'),
+          react.createElement('div', { className: OBSERVE_PRICING_CLASS },
+            react.createElement('textarea', {
+              className: OBSERVE_TEXTAREA_CLASS,
+              rows: 6,
+              spellCheck: false,
+              value: draft,
+              placeholder: t('observe.pricing.placeholder'),
+              onChange: (event) => setDraft(event?.target?.value ?? ''),
+            }),
+            pricingError !== null ? react.createElement('div', { className: ERROR_CLASS }, pricingError) : null,
+            pricingSaved ? react.createElement('div', { className: HINT_CLASS }, t('observe.pricing.saved')) : null,
+            react.createElement('div', { className: ACTIONS_CLASS },
+              renderButton({
+                key: 'save',
+                variant: 'primary',
+                size: 'sm',
+                onClick: savePricing,
+                children: t('observe.pricing.save'),
+              }),
+              renderButton({
+                key: 'reset',
+                variant: 'outline',
+                size: 'sm',
+                onClick: resetPricing,
+                children: t('observe.pricing.reset'),
+              })))),
+      ]
+
+      return react.createElement('section', { className: SECTION_CLASS },
+        react.createElement('h2', { className: HEADING_CLASS }, t('observe.title')),
+        react.createElement('p', { className: INTRO_CLASS }, t('observe.intro')),
+        ...rows)
+    }
+
+    return { SessionMenuDelete, TurnDeleteAction, DeletedTurnMarker, TurnCost, RestartSection, ObserveSection, OverlayDialogs }
   }
 
   /**
@@ -3000,6 +3762,12 @@ let clientCtx
 
     await probeFeatures()
     registerSlots(ctx, components(React))
+    // 提醒运行时只在 observe 组件可用时才装：组件被关掉 = 不订阅、不响铃，与「关掉就什么都不做」
+    // 这条语义一致（见 docs/CONTRACT.md 第 6 节）。音频解锁不注册任何东西，只是等第一次手势。
+    if (isFeatureAvailable('observe')) {
+      armAudioUnlock()
+      attachObserveRuntime(ctx)
+    }
   }
 
   /**
@@ -3060,6 +3828,24 @@ let clientCtx
         order: 500,
         label: () => restartSectionLabel(),
       }, ui.RestartSection))
+    }
+
+    if (isFeatureAvailable('observe')) {
+      // 每轮花费徽章：与「已删轮次」的隐藏标记同一个槽位，条目不冲突（id 不同、order 更大）。
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail',
+        id: ENTRY.turnCost,
+        order: 100,
+        inject: (sessionId) => ({ sessionId }),
+      }, ui.TurnCost))
+
+      // 设置页「提醒与花费」：紧跟热重启那一节（500）排，避免与别的插件的附加页抢位置。
+      ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section',
+        id: ENTRY.observeSection,
+        order: 510,
+        label: () => observeSectionLabel(),
+      }, ui.ObserveSection))
     }
   }
 
@@ -3135,6 +3921,31 @@ let clientCtx
      * 排障用：界面上少了一个入口时，先看这里是不是 `false`。
      */
     features: featureSnapshot,
+    /**
+     * 提醒与花费的排障与测试入口。
+     *
+     * `prefs` / `save` 读写的是这份浏览器设置；`reset` 只给离线测试用（忘掉缓存，下次重新解析）；
+     * `computeTurnCost` / `isPeakPricingTime` / `formatCost` 都是纯函数，可以直接拿真实用量核对金额。
+     */
+    observe: {
+      prefs: () => getObservePrefs(),
+      save: (patch) => saveObservePrefs(patch),
+      reset: () => { observePrefsCache = undefined },
+      computeTurnCost,
+      isPeakPricingTime,
+      formatCost,
+      describeTurnCost,
+      pricing: () => observePricingTable(),
+      play: (sound, volume) => playCompletionChime(sound, volume),
+      notify: notifyCompletedSessions,
+      sounds: OBSERVE_SOUNDS,
+      defaults: DEFAULT_OBSERVE_PREFS,
+      builtinPricing: BUILTIN_PRICING,
+      /** 测试用：丢掉已缓存的 AudioContext，让下一次播放重新探测环境。 */
+      resetAudio: () => { observeAudioContext = undefined },
+      /** 真机排障：已经真正发出声的次数（任务完成边沿是否触发过）。 */
+      stats: () => ({ chimes: observeChimeCount }),
+    },
     restart: {
       phases: RESTART_PHASES,
       constants: {

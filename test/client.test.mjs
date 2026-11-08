@@ -345,19 +345,23 @@ test('factory 只 require 声明过的模块，且用到的导出名都取到了
   ])
 })
 
-test('apply 注册五个槽位，且每个 list 槽位都带 id', async () => {
+test('apply 注册七条槽位条目（四个组件），且每个 list 槽位都带 id', async () => {
   await loaded.apply(makeContext())
 
   assert.deepEqual(slotInjections.sort(), [
     'conversation.chat.assistant-actions',
+    // 轮次尾部两个条目：已删轮次的隐藏标记（turn）与每轮花费徽章（observe）。
     'conversation.chat.turnTail',
+    'conversation.chat.turnTail',
+    // 设置页两节：热重启（restart）与提醒花费（observe）。
+    'settings.section',
     'settings.section',
     'shell.overlay',
     'sidebar.workspaces.session.menu.item',
   ])
-  assert.deepEqual(serviceInjections.sort(), ['locale', 'sessions'], '服务注入走 ctx.inject')
+  assert.deepEqual(serviceInjections.sort(), ['locale', 'sessions', 'uiSession'], '服务注入走 ctx.inject')
 
-  assert.equal(registrations.length, 5)
+  assert.equal(registrations.length, 7)
   for (const entry of registrations) {
     assert.equal(entry.options.name, entry.name, 'register 的 name 必须与 inject 的槽位一致')
     assert.equal(typeof entry.options.id, 'string', `${entry.name} 是 list 槽位，必须有 id`)
@@ -456,7 +460,20 @@ test('每个组件都能被构造出来（不依赖模块初始化阶段的 hook
     sessionId: 'session-1',
     displayTitle: '示例会话',
     messageId: 'msg-1',
-    turn: { turn: 2 },
+    // 轮次尾部两个条目都要能构造：隐藏标记只用 turn 号，花费徽章还要读 turn-tail 的用量。
+    turn: {
+      turn: 2,
+      data: {
+        get: () => ({
+          tokenUsage: {
+            uncachedInputTokens: 1200,
+            outputTokens: 400,
+            routes: [{ provider: 'deepseek-official', model: 'deepseek-flash' }],
+          },
+        }),
+        source: () => undefined,
+      },
+    },
     useMenuOpenState: () => [true, () => {}],
     useSession: () => false,
   }
@@ -467,6 +484,11 @@ test('每个组件都能被构造出来（不依赖模块初始化阶段的 hook
     // 弹窗没有激活的目标时返回 null，这是正常的；其余必须画出东西。
     if (entry.name === 'shell.overlay') {
       assert.equal(tree, null, '没有目标时弹窗不该渲染')
+      continue
+    }
+    // 花费徽章依赖 Chat 发布的精确用量；拿不到时按契约不渲染（这里给了用量，所以必须有东西）。
+    if (entry.options.id === 'agent-control-turn-cost') {
+      assert.notEqual(tree, null, '有 token 用量时应当渲染花费徽章')
       continue
     }
     assert.notEqual(tree, null, `${entry.name} 应当渲染出内容`)
@@ -3113,21 +3135,28 @@ test('组件探针：只关掉重启时，设置页不注册、重启界面不�
     await copy.apply(makeContext())
 
     assert.deepEqual(probed.sort(), [
+      '/api/agent-control/observe/status',
       '/api/agent-control/restart/status',
       '/api/agent-control/session/status',
       '/api/agent-control/turn/status',
-    ], '三个组件各探一次（同源只读 GET）')
+    ], '四个组件各探一次（同源只读 GET）')
     assert.deepEqual(slotInjections.sort(), [
       'conversation.chat.assistant-actions',
       'conversation.chat.turnTail',
+      'conversation.chat.turnTail',
+      'settings.section',
       'shell.overlay',
       'sidebar.workspaces.session.menu.item',
-    ], '★ 关掉重启就不该注册设置页')
-    assert.equal(registrations.some((entry) => entry.name === 'settings.section'), false)
+    ], '★ 关掉重启后设置页只剩提醒那一节')
+    assert.equal(registrations.filter((entry) => entry.name === 'settings.section').length, 1,
+      '关掉重启就只剩提醒那一节')
+    assert.equal(registrations.some((entry) => entry.options.id === 'agent-control-restart'), false,
+      '★ 关掉重启就不该注册热重启那一节')
     assert.deepEqual(globalThis.window.__dshAgentControl.features(), {
       session: true,
       turn: true,
       restart: false,
+      observe: true,
     }, '排障抓手要如实报告这次探测到的开关')
 
     // 弹窗宿主里不再有重启/关闭那一套：剩下的删除用途没有目标时什么都不渲染。
@@ -3152,7 +3181,248 @@ test('组件探针：全部探不到（网络错误）时一个槽位都不注�
       session: false,
       turn: false,
       restart: false,
+      observe: false,
     })
+  } finally {
+    copy.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 提醒与花费（observe 组件）：金额折算、峰谷判定、设置存取、完成铃声
+// ---------------------------------------------------------------------------
+
+/** bundle 暴露的 observe 排障抓手（纯函数都在它上面）。 */
+function observeApi() {
+  const expose = globalThis.window.__dshAgentControl
+  assert.ok(expose?.observe, 'bundle 要暴露 observe 排障抓手')
+  return expose.observe
+}
+
+test('完成铃声：没有音频能力时安静地返回 false，不抛也不缓存失败', () => {
+  const api = observeApi()
+  api.resetAudio()
+  const original = globalThis.AudioContext
+  delete globalThis.AudioContext
+  try {
+    assert.equal(api.play('chime', 0.5), false, '拿不到 AudioContext 时只放弃播放')
+  } finally {
+    globalThis.AudioContext = original
+    api.resetAudio()
+  }
+})
+
+test('每轮花费：按路由与峰谷单价折算，缓存命中比未命中便宜得多', () => {
+  const api = observeApi()
+  const usage = {
+    uncachedInputTokens: 1000,
+    cacheReadTokens: 2000,
+    outputTokens: 500,
+    routes: [{ provider: 'deepseek-official', model: 'deepseek-flash' }],
+  }
+  const peak = api.computeTurnCost(usage, { peak: true })
+  assert.equal(peak.known, true)
+  // 1000 × 2 + 2000 × 0.04 + 500 × 8 = 6080 / 1e6
+  assert.ok(Math.abs(peak.cost - 0.00608) < 1e-9, `高峰金额不对：${peak.cost}`)
+  assert.equal(peak.currency, 'CNY')
+  assert.equal(api.formatCost(peak.cost, peak.currency), '¥0.0061')
+
+  const offPeak = api.computeTurnCost(usage, { peak: false })
+  assert.ok(Math.abs(offPeak.cost - 0.00304) < 1e-9, `空闲金额不对：${offPeak.cost}`)
+  assert.equal(api.formatCost(offPeak.cost), '¥0.0030')
+})
+
+test('每轮花费：未知模型只报「—」，拿不到用量时返回 null，不猜价格', () => {
+  const api = observeApi()
+  const result = api.computeTurnCost({
+    uncachedInputTokens: 10,
+    outputTokens: 5,
+    routes: [{ provider: 'openrouter', model: 'some/unknown-model' }],
+  }, { peak: true })
+  assert.equal(result.known, false)
+  assert.equal(result.route.provider, 'openrouter')
+  assert.equal(api.formatCost(0), '¥0')
+  assert.equal(api.formatCost(0.00001), '<¥0.0001')
+  assert.equal(api.formatCost(1.5), '¥1.50')
+  assert.equal(api.formatCost(0.5, 'USD'), '$0.5000')
+  assert.equal(api.computeTurnCost(undefined), null)
+})
+
+test('每轮花费：高峰时段按北京时间工作日 9–12 与 14–18 判定', () => {
+  const api = observeApi()
+  // 2026-11-09 是周一、2026-11-07 是周六（北京时间）。
+  assert.equal(api.isPeakPricingTime(Date.UTC(2026, 10, 9, 2, 0)), true, '周一 10:00 是高峰')
+  assert.equal(api.isPeakPricingTime(Date.UTC(2026, 10, 9, 4, 30)), false, '周一 12:30 不是高峰')
+  assert.equal(api.isPeakPricingTime(Date.UTC(2026, 10, 9, 6, 30)), true, '周一 14:30 是高峰')
+  assert.equal(api.isPeakPricingTime(Date.UTC(2026, 10, 7, 2, 0)), false, '周六 10:00 不是高峰')
+})
+
+test('每轮花费：自定义价目表可以覆盖内置表，恢复后回到内置价', () => {
+  const api = observeApi()
+  try {
+    api.save({ pricing: {
+      'openrouter/anthropic/claude-sonnet-5.5': {
+        currency: 'USD',
+        peak: { input: 3, cacheRead: 0.3, cacheWrite: 3.75, output: 15 },
+      },
+    } })
+    const usage = {
+      uncachedInputTokens: 1_000_000,
+      outputTokens: 0,
+      routes: [{ provider: 'openrouter', model: 'anthropic/claude-sonnet-5.5' }],
+    }
+    const custom = api.computeTurnCost(usage, { peak: true })
+    assert.equal(custom.known, true)
+    assert.equal(custom.currency, 'USD')
+    assert.ok(Math.abs(custom.cost - 3) < 1e-9, `自定义金额不对：${custom.cost}`)
+
+    api.save({ pricing: null })
+    const restored = api.computeTurnCost(usage, { peak: true })
+    assert.equal(restored.known, false, '恢复内置表后这个 openrouter 路由又成了未知模型')
+  } finally {
+    api.save({ pricing: null })
+  }
+})
+
+test('设置：保存 / 读取 / 恢复默认，读写的是浏览器本地存储', () => {
+  const api = observeApi()
+  const store = new Map()
+  globalThis.window.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)) },
+    removeItem: (key) => { store.delete(key) },
+  }
+  try {
+    api.reset()
+    const defaults = api.prefs()
+    assert.equal(defaults.chime, true)
+    assert.equal(defaults.sound, 'chime')
+    assert.equal(defaults.volume, 0.6)
+    assert.equal(defaults.cost, true)
+    assert.equal(defaults.scope, 'all')
+
+    api.save({ sound: 'bell', volume: 0.25, scope: 'current' })
+    assert.equal(store.size, 1, '保存后要写进 localStorage')
+    api.reset()
+    const restored = api.prefs()
+    assert.equal(restored.sound, 'bell')
+    assert.equal(restored.volume, 0.25)
+    assert.equal(restored.scope, 'current')
+  } finally {
+    delete globalThis.window.localStorage
+    api.save({ sound: 'chime', volume: 0.6, scope: 'all', pricing: null, chime: true, cost: true })
+    api.reset()
+  }
+})
+
+test('完成铃声：只在 running 由真变假的边沿响一次，首次快照与重复快照都不响', () => {
+  const api = observeApi()
+  const started = []
+  const originalAudio = globalThis.AudioContext
+  globalThis.AudioContext = class {
+    constructor() {
+      this.state = 'running'
+      this.currentTime = 0
+      this.destination = {}
+    }
+
+    createGain() {
+      return {
+        gain: { value: 0, setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+        connect() {},
+      }
+    }
+
+    createOscillator() {
+      return {
+        type: 'sine',
+        frequency: { value: 0 },
+        connect() {},
+        start() { started.push('start') },
+        stop() {},
+      }
+    }
+
+    resume() { return Promise.resolve() }
+  }
+  try {
+    api.resetAudio()
+    api.reset()
+    api.save({ chime: true, sound: 'chime', scope: 'all' })
+
+    // 1) 页面刚打开：之前没有任何 running=true 的记录，不能把「现在在跑」当成「刚完成」。
+    api.notify(new Map(), new Map([['s1', { running: true }]]))
+    assert.equal(started.length, 0, '首次快照不响')
+
+    // 2) 真边沿：true → false，三音各起一次振荡器。
+    const before = api.stats().chimes
+    api.notify(new Map([['s1', { running: true }]]), new Map([['s1', { running: false }]]))
+    assert.equal(started.length, 3, '完成时响一次（三音）')
+    assert.equal(api.stats().chimes, before + 1, '排障抓手要如实记下响过几次')
+
+    // 3) 同一份 false 快照再来一次，不该再响。
+    api.notify(new Map([['s1', { running: false }]]), new Map([['s1', { running: false }]]))
+    assert.equal(started.length, 3, '重复快照不响')
+
+    // 4) 关掉开关就不响。
+    api.save({ chime: false })
+    api.notify(new Map([['s2', { running: true }]]), new Map([['s2', { running: false }]]))
+    assert.equal(started.length, 3, '关掉开关后不响')
+  } finally {
+    globalThis.AudioContext = originalAudio
+    api.resetAudio()
+    api.save({ chime: true })
+    api.reset()
+  }
+})
+
+test('每轮花费徽章：有精确用量时显示金额，设置里关掉后不渲染', async () => {
+  await loaded.apply(makeContext())
+  const entry = registrations.find((item) => item.options.id === 'agent-control-turn-cost')
+  assert.ok(entry, 'observe 可用时要注册花费徽章')
+  const turn = {
+    turn: 3,
+    data: {
+      get: () => ({
+        tokenUsage: {
+          uncachedInputTokens: 1_000_000,
+          outputTokens: 0,
+          routes: [{ provider: 'deepseek-official', model: 'deepseek-flash' }],
+        },
+      }),
+      source: () => undefined,
+    },
+  }
+  const api = observeApi()
+  try {
+    api.save({ cost: true, pricing: null })
+    const tree = renderComponent(entry.component, { turn })
+    assert.ok(tree, '应当渲染花费徽章')
+    assert.equal(tree.props['data-agent-control-turn-cost'], 'known')
+    assert.match(String(tree.children?.[0] ?? ''), /^¥/, '徽章上显示的是一行金额')
+
+    api.save({ cost: false })
+    assert.equal(renderComponent(entry.component, { turn }), null, '关掉每轮花费后不渲染')
+  } finally {
+    api.save({ cost: true, pricing: null })
+    api.reset()
+  }
+})
+
+test('组件探针：只关掉提醒时，花费徽章与提醒设置页都不注册', async () => {
+  const copy = await loadBundleCopy('probe-observe-off', async (url) => {
+    if (String(url).includes('/observe/status')) {
+      return { ok: false, status: 404, json: async () => ({ ok: true, enabled: true }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, enabled: true }) }
+  })
+  try {
+    await copy.apply(makeContext())
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-turn-cost'), false,
+      '★ 关掉提醒后不该注册花费徽章')
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-observe'), false,
+      '★ 关掉提醒后不该注册提醒设置页')
+    assert.equal(globalThis.window.__dshAgentControl.features().observe, false)
   } finally {
     copy.restore()
   }

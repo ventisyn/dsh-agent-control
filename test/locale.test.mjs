@@ -6,7 +6,7 @@
  *   - **子路径 specifier 永远不读 package.json**，所以 `dsh-agent-control/session` 这类行没有 locale 文件就是空白；
  *   - 同目录下所有 `<语言>.json` 都会被读，`en.json` 是入口（它不存在这个目录就不扫）。
  *
- * 于是这里守三件事：四行都按宿主会用的键暴露了 locale、文件是合法 JSON 且 `meta.description` 非空、
+ * 于是这里守三件事：五行都按宿主会用的键暴露了 locale、文件是合法 JSON 且 `meta.description` 非空、
  * `files` 里带上 locale 目录（不带的话发布出去的包没有它，界面又变回空白）。
  */
 import assert from 'node:assert/strict'
@@ -19,7 +19,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
 
 /**
- * 插件列表里的四行。
+ * 插件列表里的五行。
  *
  * 宿主把行里的 `name` 拼成 `<name>/locale/en.json` 再去解析，而 `exports` 的键只能是 `./` 前缀，
  * 所以规范化之后落在下面这些键上（`enKey` / `zhKey`）。
@@ -29,6 +29,7 @@ const ROWS = [
   { specifier: 'dsh-agent-control/session', dir: 'locale/session', enKey: './session/locale/en.json', zhKey: './session/locale/zh.json' },
   { specifier: 'dsh-agent-control/turn', dir: 'locale/turn', enKey: './turn/locale/en.json', zhKey: './turn/locale/zh.json' },
   { specifier: 'dsh-agent-control/restart', dir: 'locale/restart', enKey: './restart/locale/en.json', zhKey: './restart/locale/zh.json' },
+  { specifier: 'dsh-agent-control/observe', dir: 'locale/observe', enKey: './observe/locale/en.json', zhKey: './observe/locale/zh.json' },
 ]
 
 /** 读一份 locale 文件并返回它的说明文字。 */
@@ -36,7 +37,7 @@ function descriptionOf(relativePath) {
   return JSON.parse(readFileSync(path.join(root, relativePath), 'utf8'))?.meta?.description
 }
 
-test('四行都暴露了 locale/en.json，且键是合法的 ./ 前缀形式', () => {
+test('五行都暴露了 locale/en.json，且键是合法的 ./ 前缀形式', () => {
   for (const { enKey } of ROWS) {
     assert.equal(typeof pkg.exports[enKey], 'string', `exports 缺少 ${enKey}`)
   }

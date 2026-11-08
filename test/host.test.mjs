@@ -13,7 +13,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { ERROR_CODES, PATHS, statusForCode } from '../src/shared.mjs'
+import { ERROR_CODES, FEATURES, PATHS, statusForCode } from '../src/shared.mjs'
 import { PENDING_MAX_AGE_MS, readLast, readPending, restartDir, writeLast, writePending } from '../src/restart.mjs'
 import {
   RESTART_TOOL_NAME,
@@ -1958,6 +1958,34 @@ test('GET /restart/status：canShutdown 是布尔，只反映 appExit 是否可�
   const busyStatus = await call(busy, PATHS.restartStatus, { method: 'GET' })
   assert.deepEqual(busyStatus.body.blockers.sessions.map((row) => row.sessionId), ['session-a'])
   assert.equal(busyStatus.body.canShutdown, true)
+})
+
+test('GET /observe/status：组件探针只读、无参数，返回 { ok: true, enabled: true }', async (t) => {
+  tempHome(t)
+  const host = makeHost()
+
+  const probe = await call(host, PATHS.observeStatus, { method: 'GET' })
+  assert.equal(probe.status, 200)
+  assert.deepEqual(probe.body, { ok: true, enabled: true })
+  // 这一行在 host 端只有这条只读探针：完成铃声与每轮花费都在浏览器里，没有任何 POST 路由。
+  assert.equal(host.routes.has(PATHS.observeStatus), true)
+  assert.equal((await call(host, PATHS.observeStatus, { method: 'POST' })).status, 405,
+    '探针只读：别的方泚 405')
+})
+
+test('observe 行存在时主入口不代装：那条探针不存在，其余组件照常装上', async (t) => {
+  tempHome(t)
+  // 真实部署里 observe 行写在 patch 里；被插件列表关掉时 loader 不会 apply 它。
+  // 行「存在」就够让主入口让开——否则关掉这一行等于没关，探针会被主入口悄悄装回来。
+  const host = makeHost({
+    loader: { entries: () => [{ options: { name: FEATURES.observe.plugin, disabled: true } }] },
+  })
+
+  assert.equal(host.routes.has(PATHS.observeStatus), false,
+    '★ 有自己那一行时主入口让开：关掉它就是真的没有这条路由')
+  for (const routePath of [PATHS.sessions, PATHS.turns, PATHS.restartStatus]) {
+    assert.equal(host.routes.has(routePath), true, `其余组件照常代装：${routePath}`)
+  }
 })
 
 test('生产配置下的延迟退出：不注入 deferExit 时走真实的 300 ms 定时器，响应之后才退出', async (t) => {
