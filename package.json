@@ -17,9 +17,12 @@
     "./restart": "./src/restart-plugin.mjs",
     "./restart/locale/en.json": "./locale/restart/en.json",
     "./restart/locale/zh.json": "./locale/restart/zh.json",
-    "./observe": "./src/observe-plugin.mjs",
-    "./observe/locale/en.json": "./locale/observe/en.json",
-    "./observe/locale/zh.json": "./locale/observe/zh.json",
+    "./notify": "./src/notify-plugin.mjs",
+    "./notify/locale/en.json": "./locale/notify/en.json",
+    "./notify/locale/zh.json": "./locale/notify/zh.json",
+    "./cost": "./src/cost-plugin.mjs",
+    "./cost/locale/en.json": "./locale/cost/en.json",
+    "./cost/locale/zh.json": "./locale/cost/zh.json",
     "./locale/en.json": "./locale/en.json",
     "./locale/zh.json": "./locale/zh.json",
     "./package.json": "./package.json"
@@ -37,7 +40,7 @@
     "dsh": ">=0.2.2-rc.1"
   },
   "scripts": {
-    "test": "node --check src/index.mjs && node --check src/host-wiring.mjs && node --check src/session-plugin.mjs && node --check src/turn-plugin.mjs && node --check src/restart-plugin.mjs && node --check src/observe-plugin.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/features.test.mjs && node --check test/locale.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
+    "test": "node --check src/index.mjs && node --check src/host-wiring.mjs && node --check src/session-plugin.mjs && node --check src/turn-plugin.mjs && node --check src/restart-plugin.mjs && node --check src/notify-plugin.mjs && node --check src/cost-plugin.mjs && node --check src/shared.mjs && node --check src/session-delete.mjs && node --check src/turn-delete.mjs && node --check src/restart.mjs && node --check src/restart-helper.mjs && node --check src/restart-tool.mjs && node --check client.js && node --check test/log-inspect.mjs && node --check test/v4-load-check.mjs && node --check test/fake-session.mjs && node --check test/client.test.mjs && node --check test/host.test.mjs && node --check test/features.test.mjs && node --check test/locale.test.mjs && node --check test/session-delete.test.mjs && node --check test/turn-delete.test.mjs && node --check test/restart.test.mjs && node --check test/restart-helper.test.mjs && node --test \"test/**/*.test.mjs\"",
     "log:inspect": "node test/log-inspect.mjs"
   },
   "keywords": [

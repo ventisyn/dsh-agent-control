@@ -21,9 +21,10 @@ export const PATHS = {
   turns: `${API_PREFIX}/turns`,
   turnDelete: `${API_PREFIX}/turn/delete`,
   turnStatus: `${API_PREFIX}/turn/status`,
-  // 「提醒与花费」组件（observe）的只读探针。这一行在 host 端只有这一条路由：完成铃声与
-  // 每轮花费都在浏览器里算，host 不注册 POST 路由、也不注册模型工具。
-  observeStatus: `${API_PREFIX}/observe/status`,
+  // 「任务完成提醒」（notify）与「每轮花费」（cost）两个组件各一条只读探针。这两行在 host 端
+  // 都只有这一条路由：铃声与花费都在浏览器里算，host 不注册 POST 路由、也不注册模型工具。
+  notifyStatus: `${API_PREFIX}/notify/status`,
+  costStatus: `${API_PREFIX}/cost/status`,
   // 热重启（见 docs/PLAN-hot-restart.md 3.2）。status 是新进程的「就绪探针」，
   // 辅助进程靠它判断新进程是否已经起来了。
   restartStatus: `${API_PREFIX}/restart/status`,
@@ -38,31 +39,35 @@ export const PATHS = {
 }
 
 /**
- * 四个可以**单独开关**的组件：插件列表里各占一行（`cordis.patch.yml` 的 `insert:`），
- * 关掉某一行 = 关掉这个组件（那一行的 `apply` 也不会被调用）。
- *
- * `plugin` 是那一行的模块名（`name:`），主入口靠它在 loader 里认出「这个组件有没有自己那一行」
- * （见 host-wiring.mjs 的 `hasOwnRow`）；`probe` 是这个组件的只读可用性探针，客户端在挂载时各拉一次。
- * 热重启复用已有的 `GET /restart/status`（它本来就是辅助进程的就绪探针，只读、不改变状态），
- * 所以不再多开一条路由。observe 行只有客户端功能（完成铃声、每轮花费），host 端只有一条只读探针。
- */
-/**
  * 主行（core）提供给组件行的服务名。
  *
  * 组件行 `inject` 它：**依赖不满足时 cordis 不会调用组件的 `apply`**（fiber 停在 pending），
- * 所以关掉主行 = 四个组件一起下线。这是官方插件之间表达依赖的标准方式（例如
+ * 所以关掉主行 = 五个组件一起下线。这是官方插件之间表达依赖的标准方式（例如
  * `dsh-skill-filesystem` 声明 `inject: ['skills']`、`dsh-storage-json` 声明 `inject: ['storage']`）。
  *
  * 名字刻意不带 `dsh-` 前缀：那个前缀是官方包名空间，这是本插件自己的服务。
  */
 export const CORE_SERVICE = 'agentControlCore'
 
+/**
+ * 五个可以**单独开关**的组件：插件列表里各占一行（`cordis.patch.yml` 的 `insert:`），
+ * 关掉某一行 = 关掉这个组件（那一行的 `apply` 也不会被调用）。
+ *
+ * `plugin` 是那一行的模块名（`name:`），主入口靠它在 loader 里认出「这个组件有没有自己那一行」
+ * （见 host-wiring.mjs 的 `hasOwnRow`）；`probe` 是这个组件的只读可用性探针，客户端在挂载时各拉一次。
+ * 热重启复用已有的 `GET /restart/status`（它本来就是辅助进程的就绪探针，只读、不改变状态），
+ * 所以不再多开一条路由。
+ *
+ * notify 与 cost 是两件互相独立的事（说完一轮响一声、每轮回复下方显示花费），所以是两个组件行、
+ * 各自一条只读探针：关掉其中一个不影响另一个。两行的功能都在浏览器里，host 端都不注册 POST 路由、
+ * 也不注册模型工具。
+ */
 export const FEATURES = {
   session: { plugin: `${PLUGIN_NAME}/session`, probe: `${API_PREFIX}/session/status` },
   turn: { plugin: `${PLUGIN_NAME}/turn`, probe: `${API_PREFIX}/turn/status` },
   restart: { plugin: `${PLUGIN_NAME}/restart`, probe: `${API_PREFIX}/restart/status` },
-  // 第四个组件行：宿主端只有一条只读探针，其余全在浏览器里。
-  observe: { plugin: `${PLUGIN_NAME}/observe`, probe: PATHS.observeStatus },
+  notify: { plugin: `${PLUGIN_NAME}/notify`, probe: PATHS.notifyStatus },
+  cost: { plugin: `${PLUGIN_NAME}/cost`, probe: PATHS.costStatus },
 }
 
 /**

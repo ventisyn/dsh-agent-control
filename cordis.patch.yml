@@ -7,7 +7,7 @@
       config:
         approval: ask
 
-    # 四个组件各占一行：插件列表里可以逐个开关（关掉 = 这一行被写成 `disabled: true`，
+    # 五个组件各占一行：插件列表里可以逐个开关（关掉 = 这一行被写成 `disabled: true`，
     # loader 不会 apply 它）。主入口只在「这个组件没有自己那一行」时才代装，所以关掉一行
     # 真的会让路由消失、界面入口也随之消失（见 src/host-wiring.mjs 的 hasOwnRow）。
     # ⚠️ 不要把主行的 id / name 改名：升级时 profile 里那条同 id 的行会失配。
@@ -22,8 +22,11 @@
       config:
         approval: ask
 
-    # 这一行管浏览器端的任务完成铃声与每轮花费显示；host 端只有一条只读探针
-    # （不注册 POST 路由、也没有模型工具）。它同样受主行总闸约束：主行被关掉时
-    # 这一行的 fiber 停在 pending，铃声与花费的入口都不会出现。
-    - id: agent-control-observe
-      name: dsh-agent-control/observe
+    # 下面两行是两件事，各自一个独立开关：任务完成提醒（notify）与每轮花费（cost）。
+    # host 端各只有一条只读探针（不注册 POST 路由、也没有模型工具），铃声与花费都在浏览器里。
+    # 关掉其中一行不会影响另一行；两行同样受主行总闸约束：主行被关掉时它们的 fiber 停在
+    # pending，对应入口都不会出现。
+    - id: agent-control-notify
+      name: dsh-agent-control/notify
+    - id: agent-control-cost
+      name: dsh-agent-control/cost

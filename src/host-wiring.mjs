@@ -1,13 +1,14 @@
 /**
  * dsh-agent-control — host 端「按组件接线」的唯一实现。
  *
- * 四个组件（会话删除 / 轮次删除 / 热重启与关闭 / 提醒与花费）各自可以被单独开关：在插件列表里关掉某个组件，
- * 宿主会把 patch 里对应的那一行写成 `disabled: true`，而 loader 对禁用的行**根本不会调用它的
- * apply**（`cordis-plugin-loader` 的 `Entry.update` 在 `this.disabled` 时直接返回）。
+ * 五个组件（会话删除 / 轮次删除 / 热重启与关闭 / 任务完成提醒 / 每轮花费）各自可以被单独开关：
+ * 在插件列表里关掉某一个，宿主会把 patch 里对应的那一行写成 `disabled: true`，而 loader 对
+ * 禁用的行**根本不会调用它的 `apply`**（`cordis-plugin-loader` 的 `Entry.update` 在
+ * `this.disabled` 时直接返回）。
  *
  * 因此：
  *   - 每个组件有一份可复用的接线函数（`applySessionFeature` / `applyTurnFeature` /
- *     `applyRestartFeature` / `applyObserveFeature`），主入口与子插件行调用的是**同一份**实现，
+ *     `applyRestartFeature` / `applyNotifyFeature` / `applyCostFeature`），主入口与子插件行调用的是**同一份**实现，
  *     不存在两份会漂移的注册代码；
  *   - 主入口只在「那个组件没有自己那一行」时才代装（`hasOwnRow`），否则关掉子行不起作用：
  *     行在 = 那一行是唯一负责人（开着它自己装，关掉谁都不装）；
@@ -63,7 +64,7 @@ const MAX_BODY_BYTES = 64 * 1024
  * 已经注册过的组件（进程内）。
  *
  * 为什么需要：同一个进程里可能有两个来源调用同一份接线——主入口为了兼容「只有一行
- * `agent-control` 的旧 profile」会把四个组件都装一遍，而各个子插件行各自装自己那一个。
+ * `agent-control` 的旧 profile」会把五个组件都装一遍，而各个子插件行各自装自己那一个。
  * `webServer.register` 对同一个 `(kind, path)` 会抛错，`tools.register` 也不该把同一份工具
  * 注册两次，所以这里做一道「先到先得」：后到的直接跳过。
  *
@@ -92,9 +93,9 @@ export function rememberCoreRowConfig(config) {
 }
 
 /**
- * 本体服务：主行在 `apply` 里提供它，四个组件行 `inject` 它。
+ * 本体服务：主行在 `apply` 里提供它，五个组件行 `inject` 它。
  *
- * 为什么要有这个服务：插件列表里五个开关是**两级**的——主行是总闸，四个组件行是分闸。
+ * 为什么要有这个服务：插件列表里六个开关是**两级**的——主行是总闸，五个组件行是分闸。
  * 分闸只在总闸合上时才有意义，而"合没合上"不能靠进程内的一个布尔量（loader 用
  * `Promise.all` 并发创建各行，谁先 apply 没有保证），必须靠 cordis 自己的服务依赖：
  * 主行被关掉 → 服务不存在 → 组件行的 fiber 停在 pending → 那段接线从未执行。
@@ -130,7 +131,7 @@ export function coreServiceOf(ctx) {
  * 离线测试里可断言，而不是只存在于宿主的行为里。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {'session' | 'turn' | 'restart' | 'observe'} feature - 组件名。
+ * @param {'session' | 'turn' | 'restart' | 'notify' | 'cost'} feature - 组件名。
  * @returns {void}
  */
 function refuseWithoutCore(ctx, feature) {
@@ -174,7 +175,7 @@ export function featureDisabled(config) {
  *
  * 为什么主入口必须知道这件事：插件列表右侧的开关会往 profile 的 patch 里写一条
  * `{ id, disabled: true }` 覆盖行，而 loader 对禁用的行**根本不会调用它的 apply**。主入口若无条件
- * 把四个组件全装上，关掉某个子行就完全不起作用——路由还在、界面也照样显示它的入口。
+ * 把五个组件全装上，关掉某个子行就完全不起作用——路由还在、界面也照样显示它的入口。
  *
  * 判据是 loader 里的**行存不存在**（不看它开没开）：行在 = 这一行是唯一负责人（开着：它自己装；
  * 关掉：谁都不装，于是路由消失、界面入口随之消失）；行不在（例如只有一行 `agent-control` 的旧
@@ -184,7 +185,7 @@ export function featureDisabled(config) {
  * 行的信息不该让全部功能消失；至于万一重复注册，由认领表挡住。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {'session' | 'turn' | 'restart' | 'observe'} feature - 组件名。
+ * @param {'session' | 'turn' | 'restart' | 'notify' | 'cost'} feature - 组件名。
  * @returns {boolean} 有自己那一行时为 true。
  */
 export function hasOwnRow(ctx, feature) {
@@ -205,7 +206,7 @@ function rowMatchesName(name, wanted) {
  * 认领一个组件：先到先得；已经被认领过就跳过这次注册。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {'session' | 'turn' | 'restart' | 'observe'} feature - 组件名。
+ * @param {'session' | 'turn' | 'restart' | 'notify' | 'cost'} feature - 组件名。
  * @returns {boolean} 这次该由调用者注册时为 true。
  */
 function claimFeature(ctx, feature) {
@@ -235,7 +236,7 @@ function logQuiet(ctx, message) {
 }
 
 // ---------------------------------------------------------------------------
-// 四个组件的接线
+// 五个组件的接线
 // ---------------------------------------------------------------------------
 
 /**
@@ -265,7 +266,7 @@ export function applySessionFeature(ctx, host) {
  * 装「轮次」组件：列已删轮次 + 删一轮 + 自己的只读探针。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {{ stopTimeoutMs?: number }} [host] - 副作用注入（当前未用，保持与另外两个组件一致的签名）。
+ * @param {{ stopTimeoutMs?: number }} [host] - 副作用注入（当前未用，保持与另外几个组件一致的签名）。
  * @returns {void}
  */
 export function applyTurnFeature(ctx, host) {
@@ -319,24 +320,50 @@ export function applyRestartFeature(ctx, host) {
 }
 
 /**
- * 装「提醒与花费」组件（`observe`）：只有一条只读探针。
+ * 装「任务完成提醒」组件（`notify`）：只有一条只读探针。
  *
- * 这一行的功能全在浏览器里：说完一轮时响铃提示、在回复下方显示这一轮的 token 花费。
+ * 这一行的功能全在浏览器里：说完一轮时响一声提示音（音效与音量可选，音频上下文起不来时静默降级）。
  * host 端**不注册任何 POST 路由、也不注册模型工具**——这一行没有任何会改变状态的入口，
  * 所以连可信校验那一层都用不上（`GET` 只读路由本来就没有那道闸门，见 AGENTS.md 3.5，
  * 细则 docs/CONTRACT.md 第 1 节）。
  *
- * 客户端靠这条探针判断这一行开没开：关掉这一行时路由根本不存在，界面于是不注册铃声与花费
- * 的显示——宁可少一个提示，也不留一个不会触发的开关。
+ * 与 cost 行是**两个独立开关**：用户可以只要铃声、不要花费显示（或反过来），所以两件事各占一行、
+ * 各自一条探针。
+ *
+ * 客户端靠这条探针判断这一行开没开：关掉这一行时路由根本不存在，界面于是不订阅完成事件
+ * ——宁可少一个提示，也不留一个不会触发的开关。
  *
  * @param {any} ctx - cordis 上下文。
- * @param {{ stopTimeoutMs?: number }} [host] - 副作用注入（当前未用，保持与另外三个组件一致的签名）。
+ * @param {{ stopTimeoutMs?: number }} [host] - 副作用注入（当前未用，保持与另外几个组件一致的签名）。
  * @returns {void}
  */
-export function applyObserveFeature(ctx, host) {
-  if (!coreServiceOf(ctx)) return refuseWithoutCore(ctx, 'observe')
-  if (!claimFeature(ctx, 'observe')) return
-  registerRoute(ctx, 'GET', FEATURES.observe.probe, () => handleFeatureStatus())
+export function applyNotifyFeature(ctx, host) {
+  if (!coreServiceOf(ctx)) return refuseWithoutCore(ctx, 'notify')
+  if (!claimFeature(ctx, 'notify')) return
+  registerRoute(ctx, 'GET', FEATURES.notify.probe, () => handleFeatureStatus())
+}
+
+/**
+ * 装「每轮花费」组件（`cost`）：只有一条只读探针。
+ *
+ * 与 notify 行是**两个独立开关**：花费徽章挂在每轮回复下方，铃声在说完一轮时响，用户可能只想留其中一个，
+ * 所以两件事各占一行、各自一条探针，关掉一个不影响另一个。
+ *
+ * 功能全在浏览器里（读 Chat 发布在 `turn-tail.tokenUsage` 上的用量，乘一份价目表）；host 端
+ * **不注册任何 POST 路由、也不注册模型工具**——这一行没有任何会改变状态的入口，所以连可信校验
+ * 那一层都用不上（`GET` 只读路由本来就没有那道闸门，见 AGENTS.md 3.5，细则 docs/CONTRACT.md 第 1 节）。
+ *
+ * 客户端靠这条探针判断这一行开没开：关掉这一行时路由根本不存在，界面于是不注册花费徽章
+ * ——宁可少一个显示，也不留一个不会更新的槽位。
+ *
+ * @param {any} ctx - cordis 上下文。
+ * @param {{ stopTimeoutMs?: number }} [host] - 副作用注入（当前未用，保持与另外几个组件一致的签名）。
+ * @returns {void}
+ */
+export function applyCostFeature(ctx, host) {
+  if (!coreServiceOf(ctx)) return refuseWithoutCore(ctx, 'cost')
+  if (!claimFeature(ctx, 'cost')) return
+  registerRoute(ctx, 'GET', FEATURES.cost.probe, () => handleFeatureStatus())
 }
 
 /**

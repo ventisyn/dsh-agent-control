@@ -1960,31 +1960,53 @@ test('GET /restart/status：canShutdown 是布尔，只反映 appExit 是否可�
   assert.equal(busyStatus.body.canShutdown, true)
 })
 
-test('GET /observe/status：组件探针只读、无参数，返回 { ok: true, enabled: true }', async (t) => {
+test('GET /notify/status：组件探针只读、无参数，返回 { ok: true, enabled: true }；notify 行存在时主入口不代装', async (t) => {
   tempHome(t)
   const host = makeHost()
 
-  const probe = await call(host, PATHS.observeStatus, { method: 'GET' })
+  const probe = await call(host, PATHS.notifyStatus, { method: 'GET' })
   assert.equal(probe.status, 200)
   assert.deepEqual(probe.body, { ok: true, enabled: true })
-  // 这一行在 host 端只有这条只读探针：完成铃声与每轮花费都在浏览器里，没有任何 POST 路由。
-  assert.equal(host.routes.has(PATHS.observeStatus), true)
-  assert.equal((await call(host, PATHS.observeStatus, { method: 'POST' })).status, 405,
-    '探针只读：别的方泚 405')
+  // 这一行在 host 端只有这条只读探针：完成铃声在浏览器里合成与播放，没有任何 POST 路由。
+  assert.equal(host.routes.has(PATHS.notifyStatus), true)
+  assert.equal((await call(host, PATHS.notifyStatus, { method: 'POST' })).status, 405,
+    '探针只读：别的方法 405')
+
+  // 真实部署里 notify 行写在 patch 里；被插件列表关掉时 loader 不会 apply 它。
+  // 行「存在」就够让主入口让开——否则关掉这一行等于没关，探针会被主入口悄悄装回来。
+  const withoutRow = makeHost({
+    loader: { entries: () => [{ options: { name: FEATURES.notify.plugin, disabled: true } }] },
+  })
+  assert.equal(withoutRow.routes.has(PATHS.notifyStatus), false,
+    '★ 有自己那一行时主入口让开：关掉它就是真的没有这条路由')
+  assert.equal(withoutRow.routes.has(PATHS.costStatus), true,
+    '★ 两个独立开关：关掉 notify 不该连带关掉 cost')
+  for (const routePath of [PATHS.sessions, PATHS.turns, PATHS.restartStatus]) {
+    assert.equal(withoutRow.routes.has(routePath), true, `其余组件照常代装：${routePath}`)
+  }
 })
 
-test('observe 行存在时主入口不代装：那条探针不存在，其余组件照常装上', async (t) => {
+test('GET /cost/status：组件探针只读、无参数，返回 { ok: true, enabled: true }；cost 行存在时主入口不代装', async (t) => {
   tempHome(t)
-  // 真实部署里 observe 行写在 patch 里；被插件列表关掉时 loader 不会 apply 它。
-  // 行「存在」就够让主入口让开——否则关掉这一行等于没关，探针会被主入口悄悄装回来。
-  const host = makeHost({
-    loader: { entries: () => [{ options: { name: FEATURES.observe.plugin, disabled: true } }] },
-  })
+  const host = makeHost()
 
-  assert.equal(host.routes.has(PATHS.observeStatus), false,
+  const probe = await call(host, PATHS.costStatus, { method: 'GET' })
+  assert.equal(probe.status, 200)
+  assert.deepEqual(probe.body, { ok: true, enabled: true })
+  // 这一行在 host 端只有这条只读探针：价目表与峰谷判定都在浏览器里，没有任何 POST 路由。
+  assert.equal(host.routes.has(PATHS.costStatus), true)
+  assert.equal((await call(host, PATHS.costStatus, { method: 'POST' })).status, 405,
+    '探针只读：别的方法 405')
+
+  const withoutRow = makeHost({
+    loader: { entries: () => [{ options: { name: FEATURES.cost.plugin, disabled: true } }] },
+  })
+  assert.equal(withoutRow.routes.has(PATHS.costStatus), false,
     '★ 有自己那一行时主入口让开：关掉它就是真的没有这条路由')
+  assert.equal(withoutRow.routes.has(PATHS.notifyStatus), true,
+    '★ 两个独立开关：关掉 cost 不该连带关掉 notify')
   for (const routePath of [PATHS.sessions, PATHS.turns, PATHS.restartStatus]) {
-    assert.equal(host.routes.has(routePath), true, `其余组件照常代装：${routePath}`)
+    assert.equal(withoutRow.routes.has(routePath), true, `其余组件照常代装：${routePath}`)
   }
 })
 

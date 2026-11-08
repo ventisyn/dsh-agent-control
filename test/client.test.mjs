@@ -345,15 +345,16 @@ test('factory 只 require 声明过的模块，且用到的导出名都取到了
   ])
 })
 
-test('apply 注册七条槽位条目（四个组件），且每个 list 槽位都带 id', async () => {
+test('apply 注册八条槽位条目（五个组件），且每个 list 槽位都带 id', async () => {
   await loaded.apply(makeContext())
 
   assert.deepEqual(slotInjections.sort(), [
     'conversation.chat.assistant-actions',
-    // 轮次尾部两个条目：已删轮次的隐藏标记（turn）与每轮花费徽章（observe）。
+    // 轮次尾部两个条目：已删轮次的隐藏标记（turn）与每轮花费徽章（cost）。
     'conversation.chat.turnTail',
     'conversation.chat.turnTail',
-    // 设置页两节：热重启（restart）与提醒花费（observe）。
+    // 设置页三节：热重启（restart）、任务完成提醒（notify）与每轮花费（cost）。
+    'settings.section',
     'settings.section',
     'settings.section',
     'shell.overlay',
@@ -361,7 +362,7 @@ test('apply 注册七条槽位条目（四个组件），且每个 list 槽位�
   ])
   assert.deepEqual(serviceInjections.sort(), ['locale', 'sessions', 'uiSession'], '服务注入走 ctx.inject')
 
-  assert.equal(registrations.length, 7)
+  assert.equal(registrations.length, 8)
   for (const entry of registrations) {
     assert.equal(entry.options.name, entry.name, 'register 的 name 必须与 inject 的槽位一致')
     assert.equal(typeof entry.options.id, 'string', `${entry.name} 是 list 槽位，必须有 id`)
@@ -3135,28 +3136,31 @@ test('组件探针：只关掉重启时，设置页不注册、重启界面不�
     await copy.apply(makeContext())
 
     assert.deepEqual(probed.sort(), [
-      '/api/agent-control/observe/status',
+      '/api/agent-control/cost/status',
+      '/api/agent-control/notify/status',
       '/api/agent-control/restart/status',
       '/api/agent-control/session/status',
       '/api/agent-control/turn/status',
-    ], '四个组件各探一次（同源只读 GET）')
+    ], '五个组件各探一次（同源只读 GET）')
     assert.deepEqual(slotInjections.sort(), [
       'conversation.chat.assistant-actions',
       'conversation.chat.turnTail',
       'conversation.chat.turnTail',
       'settings.section',
+      'settings.section',
       'shell.overlay',
       'sidebar.workspaces.session.menu.item',
-    ], '★ 关掉重启后设置页只剩提醒那一节')
-    assert.equal(registrations.filter((entry) => entry.name === 'settings.section').length, 1,
-      '关掉重启就只剩提醒那一节')
+    ], '★ 关掉重启后设置页只剩提醒与花费两节')
+    assert.equal(registrations.filter((entry) => entry.name === 'settings.section').length, 2,
+      '关掉重启就只剩提醒与花费两节')
     assert.equal(registrations.some((entry) => entry.options.id === 'agent-control-restart'), false,
       '★ 关掉重启就不该注册热重启那一节')
     assert.deepEqual(globalThis.window.__dshAgentControl.features(), {
       session: true,
       turn: true,
       restart: false,
-      observe: true,
+      notify: true,
+      cost: true,
     }, '排障抓手要如实报告这次探测到的开关')
 
     // 弹窗宿主里不再有重启/关闭那一套：剩下的删除用途没有目标时什么都不渲染。
@@ -3181,7 +3185,8 @@ test('组件探针：全部探不到（网络错误）时一个槽位都不注�
       session: false,
       turn: false,
       restart: false,
-      observe: false,
+      notify: false,
+      cost: false,
     })
   } finally {
     copy.restore()
@@ -3189,10 +3194,10 @@ test('组件探针：全部探不到（网络错误）时一个槽位都不注�
 })
 
 // ---------------------------------------------------------------------------
-// 提醒与花费（observe 组件）：金额折算、峰谷判定、设置存取、完成铃声
+// 提醒与花费（notify / cost 两个独立组件行）：金额折算、峰谷判定、设置存取、完成铃声
 // ---------------------------------------------------------------------------
 
-/** bundle 暴露的 observe 排障抓手（纯函数都在它上面）。 */
+/** bundle 暴露的提醒与花费排障抓手（两行共用的纯函数与设置都在它上面）。 */
 function observeApi() {
   const expose = globalThis.window.__dshAgentControl
   assert.ok(expose?.observe, 'bundle 要暴露 observe 排障抓手')
@@ -3409,20 +3414,45 @@ test('每轮花费徽章：有精确用量时显示金额，设置里关掉后�
   }
 })
 
-test('组件探针：只关掉提醒时，花费徽章与提醒设置页都不注册', async () => {
-  const copy = await loadBundleCopy('probe-observe-off', async (url) => {
-    if (String(url).includes('/observe/status')) {
-      return { ok: false, status: 404, json: async () => ({ ok: true, enabled: true }) }
+test('组件探针：只关掉提醒时，铃声设置节不注册，但花费徽章与花费设置节照常', async () => {
+  const copy = await loadBundleCopy('probe-notify-off', async (url) => {
+    if (String(url).includes('/notify/status')) {
+      return { ok: false, status: 404, json: async () => ({ ok: false }) }
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, enabled: true }) }
+  })
+  try {
+    await copy.apply(makeContext())
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-notify'), false,
+      '★ 关掉提醒后不该注册铃声设置节')
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-turn-cost'), true,
+      '花费徽章属于另一行，不受影响')
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-cost'), true,
+      '花费设置节同样不受影响')
+    assert.equal(globalThis.window.__dshAgentControl.features().notify, false)
+    assert.equal(globalThis.window.__dshAgentControl.features().cost, true)
+  } finally {
+    copy.restore()
+  }
+})
+
+test('组件探针：只关掉花费时，徽章与花费设置节都不注册，但铃声设置节照常', async () => {
+  const copy = await loadBundleCopy('probe-cost-off', async (url) => {
+    if (String(url).includes('/cost/status')) {
+      return { ok: false, status: 404, json: async () => ({ ok: false }) }
     }
     return { ok: true, status: 200, json: async () => ({ ok: true, enabled: true }) }
   })
   try {
     await copy.apply(makeContext())
     assert.equal(registrations.some((item) => item.options.id === 'agent-control-turn-cost'), false,
-      '★ 关掉提醒后不该注册花费徽章')
-    assert.equal(registrations.some((item) => item.options.id === 'agent-control-observe'), false,
-      '★ 关掉提醒后不该注册提醒设置页')
-    assert.equal(globalThis.window.__dshAgentControl.features().observe, false)
+      '★ 关掉花费后不该注册花费徽章')
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-cost'), false,
+      '★ 关掉花费后不该注册花费设置节')
+    assert.equal(registrations.some((item) => item.options.id === 'agent-control-notify'), true,
+      '铃声设置节属于另一行，不受影响')
+    assert.equal(globalThis.window.__dshAgentControl.features().cost, false)
+    assert.equal(globalThis.window.__dshAgentControl.features().notify, true)
   } finally {
     copy.restore()
   }

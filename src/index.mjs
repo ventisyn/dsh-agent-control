@@ -1,28 +1,29 @@
 /**
  * dsh-agent-control — host 端插件入口（core 行）。
  *
- * 「一行一个组件」：插件列表里本插件下有五行——这一行（core）+ 四个组件行
+ * 「一行一个组件」：插件列表里本插件下有六行——这一行（core）+ 五个组件行
  * （`agent-control-session` / `agent-control-turn` / `agent-control-restart` /
- * `agent-control-observe`，见 `cordis.patch.yml`）。这一行负责：
+ * `agent-control-notify` / `agent-control-cost`，见 `cordis.patch.yml`）。这一行负责：
  *
  *   1. **客户端 bundle 的交付**（`dsh.client.platform = web` + `exports["./client"]` 是声明层；
  *      这一行保证插件装进来时界面入口就位）；
  *   2. **启动清理** `pruneOrphanArchives()`：删会话时留下的那条归档标记在实例重启后成了孤儿，
  *      这里把它收干净；
- *   3. **「按行构建各功能」的接线**：四个组件的接线都只有一份实现（`./host-wiring.mjs`），
+ *   3. **「按行构建各功能」的接线**：五个组件的接线都只有一份实现（`./host-wiring.mjs`），
  *      这一行在**那个组件没有自己那一行**时用它把组件装上——旧 profile 只有一行 `agent-control`
  *      时行为与以前完全一致（全部功能启用）；而某个组件行存在（哪怕被关掉）时由那一行说了算，
  *      否则插件列表里的开关不起作用（关掉的行 loader 根本不会 apply，见 `host-wiring.mjs` 的
  *      `hasOwnRow`）。子插件行调用的也是同一份接线，所以不存在两份会漂移的注册代码。
  *
  * 业务逻辑在 `./session-delete.mjs` / `./turn-delete.mjs` / `./restart*.mjs`（纯逻辑，可离线单测）；
- * 路由与错误映射在 `./host-wiring.mjs`（四个组件各一份）。**host 端不 import 任何
+ * 路由与错误映射在 `./host-wiring.mjs`（五个组件各一份）。**host 端不 import 任何
  * `@deepseek-ai/*`**：顶层 import 解析失败会让整个插件消失（AGENTS.md 3.7，细则见 docs/CONTRACT.md 第 3 节）。
  */
 import { PLUGIN_NAME, sessionDirNames } from './shared.mjs'
 import { listSessions } from './session-delete.mjs'
 import {
-  applyObserveFeature,
+  applyCostFeature,
+  applyNotifyFeature,
   applyRestartFeature,
   applySessionFeature,
   applyTurnFeature,
@@ -52,10 +53,10 @@ export const inject = hostInject
 /**
  * 这一行（core）的入口：提供本体服务、把「没有自己那一行」的组件装上，然后做启动清理。
  *
- * **本体服务**（`agentControlCore`）是四个组件行 `inject` 的依赖，也是"总闸"：关掉本行，
- * 那四个 fiber 停在 pending，界面会如实显示它们未运行。
+ * **本体服务**（`agentControlCore`）是五个组件行 `inject` 的依赖，也是"总闸"：关掉本行，
+ * 那五个 fiber 停在 pending，界面会如实显示它们未运行。
  *
- * 四个组件行的接线函数是**同一份实现**（`./host-wiring.mjs`）：
+ * 五个组件行的接线函数是**同一份实现**（`./host-wiring.mjs`）：
  *   - 组件有自己那一行 → 这里让开（由那一行负责；那一行被关掉时谁都不装，路由随之消失）；
  *   - 组件没有自己那一行（旧 profile / 手工删过 row）→ 这里代装，行为与以前一致。
  *
@@ -72,13 +73,15 @@ export const inject = hostInject
 export function apply(ctx, config, host) {
   // 主行的配置要在装配组件**之前**记下：热重启那一行的 apply 会回退读它（拆行之后旧配置仍写在主行）。
   rememberCoreRowConfig(config)
-  // 本体服务：四个组件行 `inject` 它，所以这一行是总闸——关掉本行，组件行拿不到服务、停在 pending，
+  // 本体服务：五个组件行 `inject` 它，所以这一行是总闸——关掉本行，组件行拿不到服务、停在 pending，
   // 一个路由都不会注册（见 host-wiring.mjs 的 provideCoreService）。
   void provideCoreService(ctx)
   if (!hasOwnRow(ctx, 'session')) applySessionFeature(ctx, host)
   if (!hasOwnRow(ctx, 'turn')) applyTurnFeature(ctx, host)
-  // 「提醒与花费」这一行在 host 端只有一条只读探针，不涉及 config。
-  if (!hasOwnRow(ctx, 'observe')) applyObserveFeature(ctx, host)
+  // 「任务完成提醒」与「每轮花费」两行在 host 端各只有一条只读探针，不涉及 config。
+  // 两个独立开关：只装其中一行时，另一件事的功能就不出现。
+  if (!hasOwnRow(ctx, 'notify')) applyNotifyFeature(ctx, host)
+  if (!hasOwnRow(ctx, 'cost')) applyCostFeature(ctx, host)
   // 重启的接线要用插件行的 `config`（审批策略由它决定），所以把 config 一起交给它。
   // `fallbackConfig`：热重启那一行的 `approval` 没写时回退到主行的配置——用户升级前那份配置
   // 就写在主行上，拆行之后不能静默失效（见 restart-tool.mjs 的 resolveApprovalMode）。

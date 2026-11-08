@@ -2,9 +2,9 @@
  * 组件级开关的离线测试：「一行一个组件」这套结构在**接线层面**成立。
  *
  * 覆盖四件事：
- *   1. 四个子插件行各自只注册自己那几条路由（可以单独存在，不依赖主入口）；
- *   2. 主入口（只有一行 `agent-control` 的旧 profile）把四个组件全装上，且每条路由 / 工具**只注册一次**；
- *   3. 五行都在的 profile（真实默认配置）里，主入口让开、子行自己装，**没有任何重复注册**；
+ *   1. 五个子插件行各自只注册自己那几条路由（可以单独存在，不依赖主入口）；
+ *   2. 主入口（只有一行 `agent-control` 的旧 profile）把五个组件全装上，且每条路由 / 工具**只注册一次**；
+ *   3. 六行都在的 profile（真实默认配置）里，主入口让开、子行自己装，**没有任何重复注册**；
  *   4. `config.enabled: false` ⇒ 这个子插件零注册、零订阅、不抛错。
  * 外加一条纯解析断言：`cordis.patch.yml` 的组件行 id 唯一、name 能在 `package.json` 的 exports 里解析。
  *
@@ -26,14 +26,21 @@ const main = await import('../src/index.mjs')
 const sessionRow = await import('../src/session-plugin.mjs')
 const turnRow = await import('../src/turn-plugin.mjs')
 const restartRow = await import('../src/restart-plugin.mjs')
-const observeRow = await import('../src/observe-plugin.mjs')
+const notifyRow = await import('../src/notify-plugin.mjs')
+const costRow = await import('../src/cost-plugin.mjs')
 
-/** 四个组件各自的路由清单（探针 + 原有路由）。observe 只有一条只读探针，没有任何状态变更入口。 */
+/**
+ * 五个组件各自的路由清单（探针 + 原有路由）。
+ *
+ * notify 与 cost 都只有一条只读探针：两件事的开关是分开的，宿主端各有一条可用性探针，
+ * 没有任何状态变更入口。
+ */
 const ROUTES = {
   session: [FEATURES.session.probe, PATHS.sessions, PATHS.sessionDelete],
   turn: [FEATURES.turn.probe, PATHS.turns, PATHS.turnDelete],
   restart: [FEATURES.restart.probe, PATHS.restart, PATHS.shutdown],
-  observe: [FEATURES.observe.probe],
+  notify: [FEATURES.notify.probe],
+  cost: [FEATURES.cost.probe],
 }
 
 /** webServer 注册用的键（`kind` 固定是 exact）。 */
@@ -163,7 +170,7 @@ function rowEnv(home, extra = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. 四个子插件各自单独存在
+// 1. 五个子插件各自单独存在
 // ---------------------------------------------------------------------------
 
 test('只加载 session 子插件：只注册它自己那三条路由，别的路径一个都没有', (t) => {
@@ -184,7 +191,7 @@ test('只加载 session 子插件：只注册它自己那三条路由，别的�
     ].sort(),
     '三条路由各一条 effect（disposer 交给 ctx.effect）+ 一条认领释放（fiber 卸载时释放）')
   // 别的组件的路由与工具一个都没有：单独装一行不会顺手带出别的东西。
-  for (const routePath of [...ROUTES.turn, ...ROUTES.restart, ...ROUTES.observe]) {
+  for (const routePath of [...ROUTES.turn, ...ROUTES.restart, ...ROUTES.notify, ...ROUTES.cost]) {
     assert.equal(system.routes.has(keyOf(routePath)), false, `不该有 ${routePath}`)
   }
   assert.deepEqual(system.tools, [])
@@ -212,26 +219,50 @@ test('只加载 restart 子插件：三条路由 + restart_harness 工具一次'
   assert.equal(system.routes.has(keyOf(PATHS.turns)), false, 'turn 组件的路由不该出现')
 })
 
-test('只加载 observe 子插件：只有那一条只读探针，没有 POST 路由、没有工具', async (t) => {
+test('只加载 notify 子插件：只有那一条只读探针，没有 POST 路由、没有工具', async (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
   const env = rowEnv(tempHome(t))
   const row = makeRow(system, env)
 
-  observeRow.apply(row.ctx, undefined, env)
+  notifyRow.apply(row.ctx, undefined, env)
 
-  assert.deepEqual([...system.routes.keys()].sort(), ROUTES.observe.map(keyOf).sort())
+  assert.deepEqual([...system.routes.keys()].sort(), ROUTES.notify.map(keyOf).sort())
   assert.deepEqual(row.effects.map((label) => label.replace(/^dsh-agent-control: /, '')).sort(),
-    ['claim observe', `GET ${FEATURES.observe.probe}`].sort(),
+    ['claim notify', `GET ${FEATURES.notify.probe}`].sort(),
     '一条探针一条 effect（disposer 交给 ctx.effect）+ 一条认领释放')
 
-  const probe = await callRoute(system, FEATURES.observe.probe)
+  const probe = await callRoute(system, FEATURES.notify.probe)
   assert.equal(probe.status, 200)
   assert.deepEqual(probe.body, { ok: true, enabled: true })
-  assert.equal((await callRoute(system, FEATURES.observe.probe, { method: 'POST' })).status, 405,
+  assert.equal((await callRoute(system, FEATURES.notify.probe, { method: 'POST' })).status, 405,
     '这一行没有任何状态变更入口，探针只读')
-  assert.deepEqual(system.tools, [], '铃声与花费都在浏览器里，不需要模型工具')
+  assert.deepEqual(system.tools, [], '铃声在浏览器里合成，不需要模型工具')
   assert.deepEqual(row.events, [], '这一组不订阅任何宿主事件')
+  assert.equal(system.routes.has(keyOf(FEATURES.cost.probe)), false, '★ 独立开关：notify 行不顺手带出 cost 行')
+})
+
+test('只加载 cost 子插件：只有那一条只读探针，没有 POST 路由、没有工具', async (t) => {
+  resetFeatureClaimsForTest()
+  const system = makeSystem()
+  const env = rowEnv(tempHome(t))
+  const row = makeRow(system, env)
+
+  costRow.apply(row.ctx, undefined, env)
+
+  assert.deepEqual([...system.routes.keys()].sort(), ROUTES.cost.map(keyOf).sort())
+  assert.deepEqual(row.effects.map((label) => label.replace(/^dsh-agent-control: /, '')).sort(),
+    ['claim cost', `GET ${FEATURES.cost.probe}`].sort(),
+    '一条探针一条 effect（disposer 交给 ctx.effect）+ 一条认领释放')
+
+  const probe = await callRoute(system, FEATURES.cost.probe)
+  assert.equal(probe.status, 200)
+  assert.deepEqual(probe.body, { ok: true, enabled: true })
+  assert.equal((await callRoute(system, FEATURES.cost.probe, { method: 'POST' })).status, 405,
+    '这一行没有任何状态变更入口，探针只读')
+  assert.deepEqual(system.tools, [], '花费在浏览器里算，不需要模型工具')
+  assert.deepEqual(row.events, [], '这一组不订阅任何宿主事件')
+  assert.equal(system.routes.has(keyOf(FEATURES.notify.probe)), false, '★ 独立开关：cost 行不顺手带出 notify 行')
 })
 
 test('组件的只读探针：只读、200、`{ ok: true, enabled: true }`，且不接受 POST', async (t) => {
@@ -252,7 +283,7 @@ test('组件的只读探针：只读、200、`{ ok: true, enabled: true }`，且
 // 2. 主入口（只有一行 agent-control 的旧 profile）
 // ---------------------------------------------------------------------------
 
-test('主入口：四个组件共 10 条路由各一次（含四条探针），工具一次，没有重复注册', (t) => {
+test('主入口：五个组件共 11 条路由各一次（含五条探针），工具一次，没有重复注册', (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
   const home = tempHome(t)
@@ -260,9 +291,15 @@ test('主入口：四个组件共 10 条路由各一次（含四条探针），�
 
   main.apply(makeRow(system, host).ctx, { approval: 'ask' }, host)
 
-  const expected = [...ROUTES.session, ...ROUTES.turn, ...ROUTES.restart, ...ROUTES.observe].map(keyOf).sort()
+  const expected = [
+    ...ROUTES.session,
+    ...ROUTES.turn,
+    ...ROUTES.restart,
+    ...ROUTES.notify,
+    ...ROUTES.cost,
+  ].map(keyOf).sort()
   assert.deepEqual([...system.routes.keys()].sort(), expected)
-  assert.equal(expected.length, 10)
+  assert.equal(expected.length, 11)
   assert.deepEqual(system.tools.map((definition) => definition.name), ['restart_harness'])
 })
 
@@ -280,18 +317,19 @@ test('主入口重复 apply（同一个 ctx）：认领表挡住第二次，不�
   assert.equal(system.tools.length, 1)
 })
 
-test('主入口 + 四个子插件行（五行都在的真实配置）：每条路由仍只注册一次', (t) => {
+test('主入口 + 五个子插件行（六行都在的真实配置）：每条路由仍只注册一次', (t) => {
   resetFeatureClaimsForTest()
   const system = makeSystem()
   const home = tempHome(t)
-  // 假 loader：五行都在。主入口见到某个组件行存在时让开，由那一行自己装。
+  // 假 loader：六行都在。主入口见到某个组件行存在时让开，由那一行自己装。
   const loader = {
     entries: () => [
       { options: { name: 'dsh-agent-control' } },
       { options: { name: FEATURES.session.plugin } },
       { options: { name: FEATURES.turn.plugin } },
       { options: { name: FEATURES.restart.plugin } },
-      { options: { name: FEATURES.observe.plugin } },
+      { options: { name: FEATURES.notify.plugin } },
+      { options: { name: FEATURES.cost.plugin } },
     ],
   }
   const env = rowEnv(home, { loader })
@@ -300,10 +338,17 @@ test('主入口 + 四个子插件行（五行都在的真实配置）：每条�
   sessionRow.apply(makeRow(system, env).ctx, undefined, undefined)
   turnRow.apply(makeRow(system, env).ctx, undefined, undefined)
   restartRow.apply(makeRow(system, env).ctx, undefined, env)
-  observeRow.apply(makeRow(system, env).ctx, undefined, env)
+  notifyRow.apply(makeRow(system, env).ctx, undefined, env)
+  costRow.apply(makeRow(system, env).ctx, undefined, env)
 
-  const expected = [...ROUTES.session, ...ROUTES.turn, ...ROUTES.restart, ...ROUTES.observe].map(keyOf).sort()
-  assert.deepEqual([...system.routes.keys()].sort(), expected, '★ 10 条路由，一条不多一条不少')
+  const expected = [
+    ...ROUTES.session,
+    ...ROUTES.turn,
+    ...ROUTES.restart,
+    ...ROUTES.notify,
+    ...ROUTES.cost,
+  ].map(keyOf).sort()
+  assert.deepEqual([...system.routes.keys()].sort(), expected, '★ 11 条路由，一条不多一条不少')
   assert.deepEqual(system.tools.map((definition) => definition.name), ['restart_harness'], '★ 工具也只注册一次')
 })
 
@@ -337,7 +382,7 @@ test('审批策略的来源：以自己那一行为准，没写则回退主行�
   assert.equal(await readApproval({ coreConfig: { approval: 'auto' }, applyCore: true }), 'auto', '★ 主行代装时用主行那份')
   assert.equal(await readApproval({ coreConfig: { approval: 'never' }, applyCore: true }), 'ask', '主行写坏了 → 缺省 ask')
   // ⚠️ 真实装配顺序里主入口先 apply，所以「主行与子行都写了」的情形必须在这里对照：
-  // 拿不到 loader 的部署（= 主入口代装全部）与五行都在的部署，行为都要说得通。
+  // 拿不到 loader 的部署（= 主入口代装全部）与六行都在的部署，行为都要说得通。
   assert.equal(
     await readApproval({ rowConfig: { approval: 'ask' }, coreConfig: { approval: 'auto' } }),
     'ask',
@@ -346,7 +391,7 @@ test('审批策略的来源：以自己那一行为准，没写则回退主行�
   assert.equal(
     await readApproval({ rowConfig: { approval: 'ask' }, coreConfig: { approval: 'auto' }, applyCore: true }),
     'ask',
-    '★ 五行都在（主入口让开、子行做主）同样以子行为准——不能让主行的旧值把它盖掉',
+    '★ 六行都在（主入口让开、子行做主）同样以子行为准——不能让主行的旧值把它盖掉',
   )
 })
 
@@ -369,8 +414,8 @@ test('主入口：某个组件行存在时让开——那一行被关掉时它�
   for (const routePath of ROUTES.session) {
     assert.equal(system.routes.has(keyOf(routePath)), false, `★ 会话组件由那一行负责，主入口不该代装 ${routePath}`)
   }
-  const expected = [...ROUTES.turn, ...ROUTES.restart, ...ROUTES.observe].map(keyOf).sort()
-  assert.deepEqual([...system.routes.keys()].sort(), expected, '其余三个组件照常装上')
+  const expected = [...ROUTES.turn, ...ROUTES.restart, ...ROUTES.notify, ...ROUTES.cost].map(keyOf).sort()
+  assert.deepEqual([...system.routes.keys()].sort(), expected, '其余四个组件照常装上')
 })
 
 test('主入口：loader 服务拿不到时按「没有自己那一行」处理（旧行为，不静默丢功能）', (t) => {
@@ -382,7 +427,7 @@ test('主入口：loader 服务拿不到时按「没有自己那一行」处理�
   // 查不到行的信息不该让全部功能消失，重复注册由认领表挡住。
   main.apply(makeRow(system, rowEnv(home)).ctx, { approval: 'ask' }, rowEnv(home))
 
-  assert.equal(system.routes.size, 10)
+  assert.equal(system.routes.size, 11)
 })
 
 // ---------------------------------------------------------------------------
@@ -398,7 +443,8 @@ test('主行不在（本体服务拿不到）⇒ 组件行零注册、零订阅'
     ['session', sessionRow],
     ['turn', turnRow],
     ['restart', restartRow],
-    ['observe', observeRow],
+    ['notify', notifyRow],
+    ['cost', costRow],
   ]) {
     const env = rowEnv(home, { core: false })   // 主行被关掉：本体服务不存在
     const target = makeRow(system, env)
@@ -410,12 +456,13 @@ test('主行不在（本体服务拿不到）⇒ 组件行零注册、零订阅'
   assert.deepEqual(system.tools, [], '重启工具也不该注册')
 })
 
-test('四个组件行都声明了 inject 本体服务（真进程里靠这条停在 pending）', () => {
+test('五个组件行都声明了 inject 本体服务（真进程里靠这条停在 pending）', () => {
   for (const [name, row] of [
     ['session', sessionRow],
     ['turn', turnRow],
     ['restart', restartRow],
-    ['observe', observeRow],
+    ['notify', notifyRow],
+    ['cost', costRow],
   ]) {
     assert.ok(Array.isArray(row.inject), `${name} 没有 inject 声明`)
     assert.ok(row.inject.includes(CORE_SERVICE), `${name} 的 inject 缺少 ${CORE_SERVICE}`)
@@ -432,7 +479,7 @@ test('config.enabled: false ⇒ 那个子插件零注册、零订阅、也不抛
   const system = makeSystem()
   const home = tempHome(t)
 
-  for (const row of [sessionRow, turnRow, restartRow, observeRow]) {
+  for (const row of [sessionRow, turnRow, restartRow, notifyRow, costRow]) {
     const target = makeRow(system)
     assert.doesNotThrow(() => row.apply(target.ctx, { enabled: false }, rowEnv(home)))
     assert.deepEqual(target.effects, [], `${row.name} 关掉时不该注册任何东西`)
@@ -481,7 +528,7 @@ function parseRows(text) {
   return rows.filter((row) => row.name !== undefined)
 }
 
-test('cordis.patch.yml：五行的 id 唯一、name 能在 package.json 的 exports 里解析', async () => {
+test('cordis.patch.yml：六行的 id 唯一、name 能在 package.json 的 exports 里解析', async () => {
   const root = process.cwd()
   const rows = parseRows(readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8'))
   const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
@@ -491,10 +538,11 @@ test('cordis.patch.yml：五行的 id 唯一、name 能在 package.json 的 expo
     'agent-control-session',
     'agent-control-turn',
     'agent-control-restart',
-    'agent-control-observe',
-  ], '五行的顺序与 id')
-  assert.equal(new Set(rows.map((row) => row.id)).size, 5, '行 id 必须唯一')
-  assert.equal(new Set(rows.map((row) => row.name)).size, 5, '行 name 必须唯一')
+    'agent-control-notify',
+    'agent-control-cost',
+  ], '六行的顺序与 id')
+  assert.equal(new Set(rows.map((row) => row.id)).size, 6, '行 id 必须唯一')
+  assert.equal(new Set(rows.map((row) => row.name)).size, 6, '行 name 必须唯一')
 
   // 主行不许改名：升级时 profile 里那条同 id 的行会失配（见 AGENTS.md 3.10）。
   assert.equal(rows[0].name, 'dsh-agent-control')
@@ -503,7 +551,8 @@ test('cordis.patch.yml：五行的 id 唯一、name 能在 package.json 的 expo
     'dsh-agent-control/session',
     'dsh-agent-control/turn',
     'dsh-agent-control/restart',
-    'dsh-agent-control/observe',
+    'dsh-agent-control/notify',
+    'dsh-agent-control/cost',
   ])
 
   /** 把插件行的模块名解析到本包 exports 里的文件。 */
@@ -526,10 +575,11 @@ test('cordis.patch.yml：五行的 id 唯一、name 能在 package.json 的 expo
   }
 })
 
-test('四个子插件导出的 name 就是 patch 行里的模块名（供 loader 认行）', () => {
+test('五个子插件导出的 name 就是 patch 行里的模块名（供 loader 认行）', () => {
   assert.equal(sessionRow.name, FEATURES.session.plugin)
   assert.equal(turnRow.name, FEATURES.turn.plugin)
   assert.equal(restartRow.name, FEATURES.restart.plugin)
-  assert.equal(observeRow.name, FEATURES.observe.plugin)
+  assert.equal(notifyRow.name, FEATURES.notify.plugin)
+  assert.equal(costRow.name, FEATURES.cost.plugin)
   assert.equal(main.name, 'dsh-agent-control')
 })

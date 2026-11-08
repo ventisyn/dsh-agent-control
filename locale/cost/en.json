@@ -1,0 +1,5 @@
+{
+  "meta": {
+    "description": "Per-turn cost: how much a turn roughly cost, shown under each reply (token usage times a price table)."
+  }
+}
