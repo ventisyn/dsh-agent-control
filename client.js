@@ -542,6 +542,15 @@
   /** 授权请求的最长等待：超时后按当前权限处理，保证调用方总能拿到一个结果。 */
   const NOTIFICATION_PERMISSION_TIMEOUT_MS = 6000
 
+  /**
+   * 系统通知相对铃声的延迟（毫秒）：**先响铃，再弹窗**。
+   *
+   * Windows 上的系统通知自己也会有一声提示音（由系统设置决定，网页的 `silent` 不一定压得住），
+   * 与我们的铃声同时出现就成了两声响。先把铃声放出去、稍等再弹通知，两个声音自然错开。
+   * 排障抓手可以把它临时改成 0（测试用）。
+   */
+  let notificationDelayMs = 600
+
   /** 已经真的弹出过的系统通知条数（排障与真机验证用）。 */
   let observeNotificationCount = 0
 
@@ -610,6 +619,26 @@
     }
   }
 
+  /**
+   * 排一条完成通知：先让铃声响起，延迟后再弹系统通知。
+   *
+   * @param {string} sessionId - 会话 id（同时派生通知 tag）。
+   * @param {{ silent?: boolean, tag?: string, delayMs?: number }} [options] - 透传给 `showCompletionNotification`。
+   * @param {(sent: boolean) => void} [onDone] - 真正弹完之后回调（测试按钮用它更新结果文案）。
+   */
+  function scheduleCompletionNotification(sessionId, options, onDone) {
+    const run = () => {
+      const sent = showCompletionNotification(sessionId, options)
+      if (typeof onDone === 'function') onDone(sent)
+    }
+    const delay = options?.delayMs ?? notificationDelayMs
+    if (!(delay > 0)) {
+      run()
+      return
+    }
+    setTimeout(run, delay)
+  }
+
   /** 这个会话是不是子代理会话（子代理完成不响铃：它们通常由另一个任务触发，响了反而吵）。 */
   function isSubagentSession(sessionId) {
     try {
@@ -646,7 +675,8 @@
     if (completed.length === 0) return
     if (wantChime) playCompletionChime(prefs.sound, prefs.volume)
     if (wantBanner) {
-      for (const sessionId of completed) showCompletionNotification(sessionId)
+      // 先响铃、再弹窗：系统通知自己也可能有一声提示音，错开就不会叠在一起。
+      for (const sessionId of completed) scheduleCompletionNotification(sessionId)
     }
   }
 
@@ -1316,7 +1346,7 @@
     'notify.scope.all': '所有会话',
     'notify.scope.current': '仅当前会话',
     'notify.system.title': '系统通知',
-    'notify.system.desc': '一轮结束时在系统通知中心弹一条（不会再响一次，声音交给上面的铃声）。浏览器需要先授权；桌面版里通知以 Harness 自己的身份发出。',
+    'notify.system.desc': '一轮结束时先响上面的铃声、再在系统通知中心弹一条，两个声音不会叠在一起。浏览器需要先授权；桌面版里通知以 Harness 自己的身份发出。',
     'notify.system.granted': '已授权',
     'notify.system.denied': '已被浏览器阻止：到浏览器设置里允许这个站点通知',
     'notify.system.default': '尚未授权',
@@ -1501,7 +1531,7 @@
     'notify.scope.all': 'All sessions',
     'notify.scope.current': 'Current session only',
     'notify.system.title': 'Desktop notification',
-    'notify.system.desc': 'Raise a system notification when a turn finishes (no extra sound; the chime above owns audio). The browser must grant permission first; in the desktop app the banner carries the Harness identity.',
+    'notify.system.desc': 'When a turn finishes, play the chime above first and raise the system notification afterwards, so the two sounds do not overlap. The browser must grant permission first; in the desktop app the banner carries the Harness identity.',
     'notify.system.granted': 'Allowed',
     'notify.system.denied': 'Blocked by the browser: allow notifications for this site in the browser settings',
     'notify.system.default': 'Not requested yet',
@@ -3354,11 +3384,14 @@ let clientCtx
             setTestResult(result === 'unsupported' ? 'unsupported' : 'denied')
             return
           }
+          // 与真实完成同一条路径：先响铃、再弹通知，确认两个声音不会叠在一起。
+          playCompletionChime(prefs.sound === 'none' ? 'chime' : prefs.sound, prefs.volume)
           // 每次用一个唯一的会话 id：通知的 tag 由它派生，同一条测试连点两次也都会重新弹，
-          // 不会被浏览器当成「同一会话的替换」而静默吞掉。手测带声音，方便确认它真的出现了。
-          const sent = showCompletionNotification(`preview-${Date.now()}`, { silent: false })
-          setTestResult(sent ? 'sent' : 'failed')
-          if (sent) update({ systemNotify: true })
+          // 不会被浏览器当成「同一会话的替换」而静默吞掉。
+          scheduleCompletionNotification(`preview-${Date.now()}`, {}, (sent) => {
+            setTestResult(sent ? 'sent' : 'failed')
+            if (sent) update({ systemNotify: true })
+          })
         })
       }
       const permissionText = permission === 'unsupported'
@@ -4267,6 +4300,12 @@ let clientCtx
         request: () => requestNotificationPermission(),
         show: (sessionId) => showCompletionNotification(sessionId),
       },
+      /** 排障用：改「先响铃、后弹通知」的延迟（0 = 立刻弹）。 */
+      setNotificationDelay: (ms) => {
+        notificationDelayMs = Number.isFinite(ms) ? Math.max(0, ms) : 600
+        return notificationDelayMs
+      },
+      notificationDelay: () => notificationDelayMs,
       /** 测试用：丢掉已缓存的 AudioContext，让下一次播放重新探测环境。 */
       resetAudio: () => { observeAudioContext = undefined },
       /** 真机排障：已经真正发出声 / 弹出过通知的次数（完成边沿是否触发过）。 */

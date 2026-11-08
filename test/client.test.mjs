@@ -3499,6 +3499,8 @@ test('系统通知：完成边沿按会话弹一条，标题是会话名，点�
     }))
     api.reset()
     api.save({ systemNotify: true, chime: false, scope: 'all' })
+    // 把「先响铃、后弹窗」的延迟调成 0：这个用例只关心弹了什么，不关心时序。
+    api.setNotificationDelay(0)
 
     // 页面刚打开：之前没有任何 running=true 的记录，不能把「现在在跑」当成「刚完成」。
     api.notify(new Map(), new Map([['s1', { running: true }]]))
@@ -3532,6 +3534,7 @@ test('系统通知：未授权或开关关掉时安静跳过，show() 如实返�
   try {
     api.reset()
     api.save({ systemNotify: true, chime: false })
+    api.setNotificationDelay(0)
 
     api.notify(new Map([['s2', { running: true }]]), new Map([['s2', { running: false }]]))
     assert.equal(shown.length, 0, '没授权就不弹')
@@ -3598,6 +3601,30 @@ test('系统通知：权限只在主动调用时申请，已授权后不再反�
   }
 })
 
+test('系统通知：先响铃、再弹窗，两者之间留出延迟窗口', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const fake = installFakeNotification('granted', shown, requests)
+  try {
+    await loaded.apply(makeContext())
+    api.reset()
+    api.save({ systemNotify: true, chime: false, scope: 'all' })
+    api.setNotificationDelay(60)
+
+    api.notify(new Map([['s9', { running: true }]]), new Map([['s9', { running: false }]]))
+    assert.equal(shown.length, 0, '延迟窗口内还不能弹——要让铃声先响')
+
+    await new Promise((resolve) => setTimeout(resolve, 140))
+    assert.equal(shown.length, 1, '延迟结束后弹出系统通知')
+  } finally {
+    fake.restore()
+    api.setNotificationDelay(600)
+    api.save({ systemNotify: false, chime: true })
+    api.reset()
+  }
+})
+
 test('系统通知：设置节里能渲染开关与权限状态，未授权时也如实说明', async () => {
   const api = observeApi()
   const shown = []
@@ -3650,6 +3677,7 @@ test('系统通知：点「测试通知」会真的发出一条并给出结果�
 
     // 已授权：按钮可点，点一次弹一条，并显示「已发出」。
     api.save({ systemNotify: false })
+    api.setNotificationDelay(0)
     let tree = renderUntilStable(entry.component, {})
     let button = findTestNotifyButton(tree)
     assert.ok(button, '要有测试通知按钮')
