@@ -518,14 +518,29 @@
         // 老实现只接回调、返回 undefined：那一次的结果无从得知，按现状再读一次。
         return Promise.resolve(notificationPermission())
       }
-      return pending.then(
-        (result) => (result === 'granted' || result === 'denied' ? result : notificationPermission()),
-        () => notificationPermission(),
-      )
+      // 有些环境（无头浏览器、被站点策略阻断的页面）会让这个 Promise **永远不落定**：
+      // 授权框既不弹、也不 resolve。给它一个上限，超时按当前权限处理，
+      // 否则按钮点下去会一直没有任何反馈——正是这个功能上一版被投诉的样子。
+      return new Promise((resolve) => {
+        let settled = false
+        const finish = (value) => {
+          if (settled) return
+          settled = true
+          resolve(value === 'granted' || value === 'denied' ? value : notificationPermission())
+        }
+        const timer = setTimeout(() => finish(notificationPermission()), NOTIFICATION_PERMISSION_TIMEOUT_MS)
+        pending.then(
+          (result) => { clearTimeout(timer); finish(result) },
+          () => { clearTimeout(timer); finish(notificationPermission()) },
+        )
+      })
     } catch {
       return Promise.resolve(notificationPermission())
     }
   }
+
+  /** 授权请求的最长等待：超时后按当前权限处理，保证调用方总能拿到一个结果。 */
+  const NOTIFICATION_PERMISSION_TIMEOUT_MS = 6000
 
   /** 已经真的弹出过的系统通知条数（排障与真机验证用）。 */
   let observeNotificationCount = 0
@@ -561,10 +576,11 @@
   /**
    * 弹一条「任务完成」系统通知。返回是否真的弹出去。
    *
-   * `silent: true`：声音由上面那条铃声负责，通知只负责视觉，避免同一次完成响两下。
+   * 默认 `silent: true`：声音由上面那条铃声负责，通知只负责视觉，避免同一次完成响两下。
    * `tag` 按会话固定：同一个会话连续完成时新通知替换旧的，不会在通知中心堆一串。
+   * 手动「测试通知」会传 `{ silent: false, tag: … }`——用户在场且只想确认这条通知真的出现了。
    */
-  function showCompletionNotification(sessionId) {
+  function showCompletionNotification(sessionId, options) {
     const Ctor = notificationCtor()
     if (Ctor === null || Ctor.permission !== 'granted') return false
     const title = translate('notify.system.notificationTitle')
@@ -573,8 +589,8 @@
     try {
       const banner = new Ctor(title, {
         body,
-        tag: `${PLUGIN_ID}:${sessionId}`,
-        silent: true,
+        tag: options?.tag ?? `${PLUGIN_ID}:${sessionId}`,
+        silent: options?.silent !== false,
       })
       if (banner !== null && typeof banner === 'object') {
         banner.onclick = () => {
@@ -1306,6 +1322,7 @@
     'notify.system.default': '尚未授权',
     'notify.system.unsupported': '这个环境不支持系统通知',
     'notify.system.test': '测试通知',
+    'notify.system.testRequesting': '正在申请通知权限…',
     'notify.system.testSent': '已发出；若没看到横幅，检查系统通知设置与专注助手',
     'notify.system.testFailed': '没能发出这条通知：浏览器拒绝了',
     'notify.system.testDenied': '浏览器没有授予通知权限',
@@ -1490,6 +1507,7 @@
     'notify.system.default': 'Not requested yet',
     'notify.system.unsupported': 'This environment does not support notifications',
     'notify.system.test': 'Test notification',
+    'notify.system.testRequesting': 'Requesting notification permission…',
     'notify.system.testSent': 'Sent; if no banner appears, check the system notification settings and Focus Assist',
     'notify.system.testFailed': 'The notification could not be raised: the browser rejected it',
     'notify.system.testDenied': 'The browser did not grant notification permission',
@@ -3328,6 +3346,8 @@ let clientCtx
         })
       }
       const testSystemNotify = () => {
+        // 点击的瞬间就给反馈：授权框可能很久才回来，不能让人以为没点上。
+        setTestResult('requesting')
         void requestNotificationPermission().then((result) => {
           setPermission(result)
           if (result !== 'granted') {
@@ -3335,8 +3355,8 @@ let clientCtx
             return
           }
           // 每次用一个唯一的会话 id：通知的 tag 由它派生，同一条测试连点两次也都会重新弹，
-          // 不会被浏览器当成「同一会话的替换」而静默吞掉。
-          const sent = showCompletionNotification(`preview-${Date.now()}`)
+          // 不会被浏览器当成「同一会话的替换」而静默吞掉。手测带声音，方便确认它真的出现了。
+          const sent = showCompletionNotification(`preview-${Date.now()}`, { silent: false })
           setTestResult(sent ? 'sent' : 'failed')
           if (sent) update({ systemNotify: true })
         })
@@ -3348,16 +3368,18 @@ let clientCtx
           : permission === 'granted'
             ? t('notify.system.granted')
             : t('notify.system.default')
-      const testResultText = testResult === 'sent'
-        ? t('notify.system.testSent')
-        : testResult === 'failed'
-          ? t('notify.system.testFailed')
-          : testResult === 'denied'
-            ? t('notify.system.testDenied')
-            : testResult === 'unsupported'
-              ? t('notify.system.unsupported')
-              : ''
-      const testResultClass = testResult === 'sent' ? HINT_CLASS : ERROR_CLASS
+      const testResultText = testResult === 'requesting'
+        ? t('notify.system.testRequesting')
+        : testResult === 'sent'
+          ? t('notify.system.testSent')
+          : testResult === 'failed'
+            ? t('notify.system.testFailed')
+            : testResult === 'denied'
+              ? t('notify.system.testDenied')
+              : testResult === 'unsupported'
+                ? t('notify.system.unsupported')
+                : ''
+      const testResultClass = testResult === 'sent' || testResult === 'requesting' ? HINT_CLASS : ERROR_CLASS
 
       const row = (key, title, description, control) => react.createElement('div', { className: ROW_CLASS, key },
         react.createElement('div', { className: ROW_MAIN_CLASS },

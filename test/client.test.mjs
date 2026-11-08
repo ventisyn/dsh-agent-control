@@ -3556,6 +3556,26 @@ test('系统通知：未授权或开关关掉时安静跳过，show() 如实返�
   }
 })
 
+test('系统通知：requestPermission 永不落定时，超时后仍返回一个结果（不能让按钮永远没反馈）', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const fake = installFakeNotification('default', shown, requests)
+  try {
+    // 无头浏览器 / 被策略阻断的页面会返回一个永不 resolve 的 Promise：
+    // 旧实现直接 .then，于是按钮点下去没有任何反馈。
+    fake.Fake.requestPermission = () => new Promise(() => {})
+    const started = Date.now()
+    const result = await api.systemNotify.request()
+    const elapsed = Date.now() - started
+    assert.equal(result, 'default', '超时后按当前权限返回')
+    assert.ok(elapsed >= 5500, '应当等满超时窗口再放弃，实际 ' + elapsed + 'ms')
+  } finally {
+    fake.restore()
+    api.reset()
+  }
+})
+
 test('系统通知：权限只在主动调用时申请，已授权后不再反复请求', async () => {
   const api = observeApi()
   const shown = []
