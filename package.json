@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-control",
-  "version": "0.2.2-rc.1-v1.5.0",
+  "version": "0.2.2-rc.1-v1.5.1",
   "description": "DeepSeek Harness 插件：把「删除一个会话」「从模型上下文中删除一轮对话」与「热重启 DSH 进程」这些破坏性操作收进一个插件，用同一套确认与失败语义管理；另附任务完成铃声 + 系统通知与每轮对话花费显示。",
   "type": "module",
   "license": "MIT",

@@ -3598,3 +3598,68 @@ test('系统通知：设置节里能渲染开关与权限状态，未授权时�
     api.reset()
   }
 })
+
+/** 在假元素树里找符合条件的节点（测试里的树是普通对象，没有 DOM）。 */
+function findNodes(tree, predicate, out = []) {
+  if (tree === null || typeof tree !== 'object') return out
+  if (predicate(tree)) out.push(tree)
+  for (const child of tree.children ?? []) findNodes(child, predicate, out)
+  return out
+}
+
+/**
+ * 取「测试通知」按钮。
+ *
+ * 原生 Button 存在时，树里留下的是「函数组件 + props」这一层（假 React 不展开函数组件），
+ * 所以按文案 + onClick 认，而不是按节点类型认。
+ */
+function findTestNotifyButton(tree) {
+  const nodes = findNodes(tree, (node) => node.children?.[0] === '测试通知' && typeof node.props?.onClick === 'function')
+  return nodes[0]
+}
+
+test('系统通知：点「测试通知」会真的发出一条并给出结果；没权限时说明原因', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const fake = installFakeNotification('granted', shown, requests)
+  try {
+    await loaded.apply(makeContext())
+    const entry = registrations.find((item) => item.options.id === 'agent-control-notify')
+    assert.ok(entry, 'notify 行可用时要注册设置节')
+
+    // 已授权：按钮可点，点一次弹一条，并显示「已发出」。
+    api.save({ systemNotify: false })
+    let tree = renderUntilStable(entry.component, {})
+    let button = findTestNotifyButton(tree)
+    assert.ok(button, '要有测试通知按钮')
+    assert.equal(button.props.disabled, false, '已授权时按钮可点（不再依赖滞后的 state）')
+    const before = shown.length
+    const beforeCount = api.stats().notifications
+    button.props.onClick()
+    await flush()
+    flushUpdates()
+    tree = renderComponent(entry.component, {})
+    assert.equal(shown.length, before + 1, '点一次要真的弹一条')
+    assert.match(JSON.stringify(tree), /已发出/, '要点明结果，不能默默无反应')
+    assert.equal(api.stats().notifications, beforeCount + 1, '计数要与真实弹出次数一致')
+
+    // 没权限：按钮仍可点（只有 unsupported 才禁用），点击后说明「没有授予」。
+    fake.Fake.permission = 'default'
+    fake.Fake.requestPermission = async () => 'default'
+    tree = renderComponent(entry.component, {})
+    button = findTestNotifyButton(tree)
+    assert.equal(button.props.disabled, false, '权限未定时按钮仍可点，点击时再申请')
+    button.props.onClick()
+    await flush()
+    flushUpdates()
+    tree = renderComponent(entry.component, {})
+    const text = JSON.stringify(tree)
+    assert.match(text, /没有授予通知权限/, '没权限时要说明原因')
+    assert.equal(shown.length, before + 1, '没权限时不能假装发过')
+  } finally {
+    fake.restore()
+    api.save({ systemNotify: false })
+    api.reset()
+  }
+})

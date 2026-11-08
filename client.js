@@ -1306,6 +1306,9 @@
     'notify.system.default': '尚未授权',
     'notify.system.unsupported': '这个环境不支持系统通知',
     'notify.system.test': '测试通知',
+    'notify.system.testSent': '已发出；若没看到横幅，检查系统通知设置与专注助手',
+    'notify.system.testFailed': '没能发出这条通知：浏览器拒绝了',
+    'notify.system.testDenied': '浏览器没有授予通知权限',
     'notify.system.notificationTitle': '任务完成',
     'notify.system.notificationBody': '一轮回复已经结束',
     'cost.show.title': '每轮显示花费',
@@ -1487,6 +1490,9 @@
     'notify.system.default': 'Not requested yet',
     'notify.system.unsupported': 'This environment does not support notifications',
     'notify.system.test': 'Test notification',
+    'notify.system.testSent': 'Sent; if no banner appears, check the system notification settings and Focus Assist',
+    'notify.system.testFailed': 'The notification could not be raised: the browser rejected it',
+    'notify.system.testDenied': 'The browser did not grant notification permission',
     'notify.system.notificationTitle': 'Turn finished',
     'notify.system.notificationBody': 'A reply has finished',
     'cost.show.title': 'Show per-turn cost',
@@ -3284,11 +3290,26 @@ let clientCtx
       const t = translate
       const [prefs, setPrefs] = useState(() => getObservePrefs())
       const [permission, setPermission] = useState(() => notificationPermission())
+      // 「测试通知」点完之后的结果：null = 还没点过。没反馈是之前最大的问题——
+      // 点了没反应时，用户分不清是按钮禁用、权限没给，还是系统把横幅吞了。
+      const [testResult, setTestResult] = useState(null)
 
       useEffect(() => {
         const onPrefs = () => setPrefs(getObservePrefs())
         window.addEventListener(OBSERVE_PREFS_EVENT, onPrefs)
         return () => window.removeEventListener(OBSERVE_PREFS_EVENT, onPrefs)
+      }, [])
+
+      // 用户可能在页面外（浏览器地址栏 / 站点设置）授权：页面重新获得焦点时同步一次权限状态，
+      // 否则这一行会一直停在挂载时读到的「尚未授权」。
+      useEffect(() => {
+        const sync = () => setPermission(notificationPermission())
+        window.addEventListener('focus', sync)
+        window.addEventListener('visibilitychange', sync)
+        return () => {
+          window.removeEventListener('focus', sync)
+          window.removeEventListener('visibilitychange', sync)
+        }
       }, [])
 
       const update = (patch) => setPrefs(saveObservePrefs(patch))
@@ -3309,10 +3330,15 @@ let clientCtx
       const testSystemNotify = () => {
         void requestNotificationPermission().then((result) => {
           setPermission(result)
-          if (result === 'granted') {
-            showCompletionNotification('preview')
-            update({ systemNotify: true })
+          if (result !== 'granted') {
+            setTestResult(result === 'unsupported' ? 'unsupported' : 'denied')
+            return
           }
+          // 每次用一个唯一的会话 id：通知的 tag 由它派生，同一条测试连点两次也都会重新弹，
+          // 不会被浏览器当成「同一会话的替换」而静默吞掉。
+          const sent = showCompletionNotification(`preview-${Date.now()}`)
+          setTestResult(sent ? 'sent' : 'failed')
+          if (sent) update({ systemNotify: true })
         })
       }
       const permissionText = permission === 'unsupported'
@@ -3322,6 +3348,16 @@ let clientCtx
           : permission === 'granted'
             ? t('notify.system.granted')
             : t('notify.system.default')
+      const testResultText = testResult === 'sent'
+        ? t('notify.system.testSent')
+        : testResult === 'failed'
+          ? t('notify.system.testFailed')
+          : testResult === 'denied'
+            ? t('notify.system.testDenied')
+            : testResult === 'unsupported'
+              ? t('notify.system.unsupported')
+              : ''
+      const testResultClass = testResult === 'sent' ? HINT_CLASS : ERROR_CLASS
 
       const row = (key, title, description, control) => react.createElement('div', { className: ROW_CLASS, key },
         react.createElement('div', { className: ROW_MAIN_CLASS },
@@ -3394,10 +3430,15 @@ let clientCtx
               key: 'testSystemNotify',
               variant: 'outline',
               size: 'sm',
-              disabled: permission !== 'granted',
+              // 只有「环境根本没有通知能力」才禁用：权限状态可能因为浏览器外的授权而滞后，
+              // 让按钮始终可点、由点击时的实时检查决定结果，比一个灰按钮更容易排障。
+              disabled: permission === 'unsupported',
               onClick: testSystemNotify,
               children: t('notify.system.test'),
-            }))),
+            }),
+            testResultText !== ''
+              ? react.createElement('span', { className: testResultClass }, testResultText)
+              : null)),
       ]
 
       return react.createElement('section', { className: SECTION_CLASS },
