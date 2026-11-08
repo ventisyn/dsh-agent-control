@@ -56,14 +56,14 @@
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与五个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 333 项离线测试
+npm test                                                          # node --check + 334 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 86、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 333 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 87、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 334 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 

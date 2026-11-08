@@ -223,7 +223,7 @@ POST /api/agent-control/shutdown          { }（可空体）→ 202 { ok } ← �
 ## 开发
 
 ```sh
-npm test    # 语法检查 + 333 项离线测试，不需要 DSH 进程，也不碰真实 profile
+npm test    # 语法检查 + 334 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
 设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)；
