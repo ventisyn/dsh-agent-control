@@ -56,14 +56,14 @@
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与五个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 334 项离线测试
+npm test                                                          # node --check + 335 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 87、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 334 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 88、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 335 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -206,7 +206,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 - **host 端只有一条只读探针** `GET /api/agent-control/notify/status`：没有 POST 路由、没有请求体、没有模型工具。探针只用来让客户端判断这一行开没开（3.10）：关掉这一行时路由不存在，客户端就不订阅完成事件、也不注册设置页那一节。
 - **判据是 `running` 的 true → false 边沿**：订阅 `uiSession.sessionStatus`，首次快照（页面刚打开）不算完成，重复快照也不会重复响；子代理会话不响；提醒范围可以限定为「仅当前会话」。一次快照最多响一声，系统通知则按会话各弹一条。
 - **两个子开关互相独立**：铃声（`chime` / `sound` / `volume`）与系统通知（`systemNotify`，默认 `false`）分别判定，只开一个就只做一半、都关就安静完成；`scope=current` 与「子代理会话不提醒」对两者同时生效。
-- **系统通知是纯客户端 `Notification` API**：不调 PowerShell / osascript，网页版与桌面版同一份代码（桌面版里通知的身份由承载页面的宿主决定）。通知形状：title「任务完成」、body 是会话标题（拿不到标题时用「一轮回复已经结束」）、`silent: true`（声音归铃声，避免同一次完成响两下）、`tag` 按会话固定（`dsh-agent-control:<sessionId>`，同一会话重复完成是替换而不是在通知中心堆一串）；点击通知聚焦窗口并调用 `uiWorkspace.openSession(sessionId)` 回到该会话。
+- **系统通知是纯客户端 `Notification` API**：不调 PowerShell / osascript，网页版与桌面版同一份代码（桌面版里通知的身份由承载页面的宿主决定）。通知形状：title「任务完成」、body 是会话标题（拿不到标题时用「一轮回复已经结束」）、`silent: true`（声音归铃声）、`tag` 按会话固定（`dsh-agent-control:<sessionId>`，同一会话重复完成是替换而不是在通知中心堆一串）；点击通知聚焦窗口并调用 `uiWorkspace.openSession(sessionId)` 回到该会话。**顺序是先响铃、再弹窗**：系统通知自身也可能带提示音（由系统按应用的通知设置决定，网页的 `silent` 压不住），所以通知延迟约 600ms 再弹出，两个声音错开；测试按钮走同一条路径，排障抓手 `observe.setNotificationDelay(ms)` 可以把延迟调成 0。
 - **权限只从用户手势发起**：只有设置页「系统通知」行的复选框 `onChange` 与「测试通知」按钮会调 `requestNotificationPermission()`；完成边沿只读 `Notification.permission`，绝不主动弹授权框。没授权就不弹、不报错。
 - **排障抓手**：`window.__dshAgentControl.observe.systemNotify` 给出 `{ supported, permission, request, show }`（`permission` 为 `granted` / `denied` / `default` / `unsupported`，`show(sessionId)` 手动弹一条并返回是否真的弹出）；`observe.stats()` 是 `{ chimes, notifications }`，两个计数各自递增，用来判断完成边沿到底触发了哪一半。界面文案在 `client.js` 内嵌 `MESSAGES` 的 `notify.system.*`（zh / en 两套），`locale/notify/{zh,en}.json` 的 `meta.description` 同步提到系统通知。
 - **音效现场合成**：三音 / 单音 / 钟声 / 不响，音量可调，全部用 Web Audio 合成，不下载音频文件。
