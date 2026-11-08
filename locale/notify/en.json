@@ -1,5 +1,5 @@
 {
   "meta": {
-    "description": "Completion chime: a short sound when a turn finishes, with optional cue and volume."
+    "description": "Completion alert: a short chime when a turn finishes, plus an optional system notification (cue, volume and permission are adjustable)."
   }
 }

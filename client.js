@@ -4,7 +4,8 @@
  * 经 `window.__ModuleLoader__.load({ id: 'dsh-agent-control', factory })` 注册；
  * 不用 JSX、不 import CSS，样式只用 DSH 设计 token（`--dsw-*`）。
  *
- * 界面只做两件事：把破坏性操作摆到用户够得着的地方，以及在真正执行前问清楚。
+ * 界面把破坏性操作摆到用户够得着的地方、在真正执行前问清楚，并在任务完成时提醒
+ * （铃声 + 可选系统通知）、在每轮回复下方标出花费。
  * 校验与失败语义都在 host 端（`src/`）；这里不替 host 做判断，也不假装成功——
  * 失败一律把 host 返回的原因原样显示出来。
  *
@@ -36,7 +37,7 @@
     turn: '/api/agent-control/turn/status',
     // 热重启复用已有的状态接口（它本来就是辅助进程的就绪探针），不再多开一条路由。
     restart: '/api/agent-control/restart/status',
-    // 提醒与花费是两个**独立开关**的行：铃声归 notify、金额归 cost，各自一条只读探针。
+    // 提醒与花费是两个**独立开关**的行：铃声 / 系统通知归 notify、金额归 cost，各自一条只读探针。
     notify: '/api/agent-control/notify/status',
     cost: '/api/agent-control/cost/status',
   }
@@ -120,6 +121,8 @@
     volume: 0.6,
     /** `all` = 任何会话完成都响；`current` = 只响当前正在看的那个会话。 */
     scope: 'all',
+    /** 完成时同时弹一条系统通知（浏览器 Notification）。默认关，首次打开要授权；与铃声开关互不影响。 */
+    systemNotify: false,
     cost: true,
     /** 自定义价目表（按 `provider/model` 覆盖内置表）；`null` = 只用内置表。 */
     pricing: null,
@@ -345,6 +348,7 @@
       sound,
       volume: Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : DEFAULT_OBSERVE_PREFS.volume,
       scope: source.scope === 'current' ? 'current' : 'all',
+      systemNotify: source.systemNotify === true,
       cost: source.cost !== false,
       pricing: source.pricing !== null && typeof source.pricing === 'object' && !Array.isArray(source.pricing)
         ? source.pricing
@@ -477,6 +481,119 @@
     document.addEventListener?.('keydown', unlock, true)
   }
 
+  // --- 系统通知（Notification API）------------------------------------------------
+  //
+  // 只用浏览器标准能力，不调 PowerShell / osascript：网页版与桌面版（Electron）因此走同一份
+  // 代码，通知的身份由「哪个页面发出的」决定（桌面版里就是 Harness 自己）。
+  // 浏览器要求请求权限必须由用户手势触发，所以权限请求只从设置页的开关 / 测试按钮发起；
+  // 完成边沿这一侧只读 `Notification.permission`，绝不主动弹授权框。
+
+  /** 系统通知的构造函数（拿不到就返回 null；Electron 里同样是这个全局）。 */
+  function notificationCtor() {
+    const Ctor = globalThis.Notification
+    return typeof Ctor === 'function' ? Ctor : null
+  }
+
+  /** 当前通知权限：`granted` / `denied` / `default` / `unsupported`（环境根本没有通知能力）。 */
+  function notificationPermission() {
+    const Ctor = notificationCtor()
+    if (Ctor === null) return 'unsupported'
+    const permission = Ctor.permission
+    return permission === 'granted' || permission === 'denied' ? permission : 'default'
+  }
+
+  /**
+   * 请求通知权限；**只能从用户手势里调用**（浏览器会静默拒绝自动请求）。
+   *
+   * 已经 granted / denied 时直接返回现状：浏览器不会再次弹授权框，反复调用没有意义。
+   */
+  function requestNotificationPermission() {
+    const Ctor = notificationCtor()
+    if (Ctor === null) return Promise.resolve('unsupported')
+    const current = notificationPermission()
+    if (current !== 'default' || typeof Ctor.requestPermission !== 'function') return Promise.resolve(current)
+    try {
+      const pending = Ctor.requestPermission()
+      if (pending === null || typeof pending !== 'object' || typeof pending.then !== 'function') {
+        // 老实现只接回调、返回 undefined：那一次的结果无从得知，按现状再读一次。
+        return Promise.resolve(notificationPermission())
+      }
+      return pending.then(
+        (result) => (result === 'granted' || result === 'denied' ? result : notificationPermission()),
+        () => notificationPermission(),
+      )
+    } catch {
+      return Promise.resolve(notificationPermission())
+    }
+  }
+
+  /** 已经真的弹出过的系统通知条数（排障与真机验证用）。 */
+  let observeNotificationCount = 0
+
+  /** 会话标题：拿不到就用空串（通知正文退回一句通用说明）。 */
+  function sessionTitleOf(sessionId) {
+    try {
+      const item = sessionsService?.list?.getSnapshot?.()?.byId?.[sessionId]
+      const title = item?.title ?? item?.displayTitle
+      return typeof title === 'string' ? title.trim() : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /** 点通知回到对应会话：聚焦窗口 + 复用删除流程里同一个公开入口（拿不到就只聚焦）。 */
+  function focusSession(sessionId) {
+    try {
+      globalThis.window?.focus?.()
+    } catch {
+      // 聚焦是体验加分项，失败不影响打开会话。
+    }
+    const ui = lookupUiWorkspace()
+    if (ui === null || ui === undefined || typeof ui.openSession !== 'function') return false
+    try {
+      ui.openSession(sessionId)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 弹一条「任务完成」系统通知。返回是否真的弹出去。
+   *
+   * `silent: true`：声音由上面那条铃声负责，通知只负责视觉，避免同一次完成响两下。
+   * `tag` 按会话固定：同一个会话连续完成时新通知替换旧的，不会在通知中心堆一串。
+   */
+  function showCompletionNotification(sessionId) {
+    const Ctor = notificationCtor()
+    if (Ctor === null || Ctor.permission !== 'granted') return false
+    const title = translate('notify.system.notificationTitle')
+    const sessionTitle = sessionTitleOf(sessionId)
+    const body = sessionTitle !== '' ? sessionTitle : translate('notify.system.notificationBody')
+    try {
+      const banner = new Ctor(title, {
+        body,
+        tag: `${PLUGIN_ID}:${sessionId}`,
+        silent: true,
+      })
+      if (banner !== null && typeof banner === 'object') {
+        banner.onclick = () => {
+          try {
+            banner.close?.()
+          } catch {
+            // 关不掉的通知不影响跳转。
+          }
+          focusSession(sessionId)
+        }
+        banner.onerror = () => {}
+      }
+      observeNotificationCount += 1
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /** 这个会话是不是子代理会话（子代理完成不响铃：它们通常由另一个任务触发，响了反而吵）。 */
   function isSubagentSession(sessionId) {
     try {
@@ -488,24 +605,33 @@
   }
 
   /**
-   * 从会话状态快照里找出「刚刚完成任务」的会话并响铃。
+   * 从会话状态快照里找出「刚刚完成任务」的会话，按开关分别响铃 / 弹系统通知。
    *
    * 判据是 `running` 的 true → false 边沿：只有**之前确实在跑**的会话才算完成，
-   * 首次快照（页面刚打开）不会被误当成完成。一次快照最多响一声。
+   * 首次快照（页面刚打开）不会被误当成完成。铃声一次快照最多响一声；
+   * 系统通知按会话各弹一条（tag 相同，同一会话重复完成是替换而不是堆叠）。
+   *
+   * 两个开关互不影响：只开铃声就不弹通知，只开通知就只弹不响，都关就安静完成。
    */
   function notifyCompletedSessions(previous, next) {
     if (next === null || typeof next !== 'object' || typeof next.forEach !== 'function') return
     const prefs = getObservePrefs()
-    if (prefs.chime !== true || prefs.sound === 'none') return
-    let played = false
+    const wantChime = prefs.chime === true && prefs.sound !== 'none'
+    const wantBanner = prefs.systemNotify === true && notificationPermission() === 'granted'
+    if (!wantChime && !wantBanner) return
+    const completed = []
     next.forEach((status, sessionId) => {
-      if (played) return
       const before = typeof previous?.get === 'function' ? previous.get(sessionId) : undefined
       if (before?.running !== true || status?.running !== false) return
       if (prefs.scope === 'current' && !isMainViewSession(sessionId)) return
       if (isSubagentSession(sessionId)) return
-      played = playCompletionChime(prefs.sound, prefs.volume)
+      completed.push(sessionId)
     })
+    if (completed.length === 0) return
+    if (wantChime) playCompletionChime(prefs.sound, prefs.volume)
+    if (wantBanner) {
+      for (const sessionId of completed) showCompletionNotification(sessionId)
+    }
   }
 
   /**
@@ -1154,7 +1280,7 @@
     // --- 提醒与花费（observe 组件）------------------------------------------------------
     'notify.sectionLabel': '任务完成提醒',
     'notify.title': '任务完成提醒',
-    'notify.intro': '说完一轮时用一声提示音告诉你。设置只存在这个浏览器里，不进 profile。',
+    'notify.intro': '说完一轮时用一声提示音（可选再加一条系统通知）告诉你。设置只存在这个浏览器里，不进 profile。',
     'cost.sectionLabel': '每轮花费',
     'cost.title': '每轮花费',
     'cost.intro': '在每轮回复下方标出这一轮大概花了多少钱（按 token 用量与价目表估算）。设置只存在这个浏览器里，不进 profile。',
@@ -1173,6 +1299,15 @@
     'notify.scope.desc': '只提醒你正在看的那个会话，还是任何会话完成都提醒。',
     'notify.scope.all': '所有会话',
     'notify.scope.current': '仅当前会话',
+    'notify.system.title': '系统通知',
+    'notify.system.desc': '一轮结束时在系统通知中心弹一条（不会再响一次，声音交给上面的铃声）。浏览器需要先授权；桌面版里通知以 Harness 自己的身份发出。',
+    'notify.system.granted': '已授权',
+    'notify.system.denied': '已被浏览器阻止：到浏览器设置里允许这个站点通知',
+    'notify.system.default': '尚未授权',
+    'notify.system.unsupported': '这个环境不支持系统通知',
+    'notify.system.test': '测试通知',
+    'notify.system.notificationTitle': '任务完成',
+    'notify.system.notificationBody': '一轮回复已经结束',
     'cost.show.title': '每轮显示花费',
     'cost.show.desc': '按 token 用量与价目表估算，显示在每轮回复的下方；拿不到用量或价目时显示「—」。',
     'cost.unknownShort': '—',
@@ -1326,7 +1461,7 @@
     // --- Sounds and per-turn cost (observe component) --------------------------------------
     'notify.sectionLabel': 'Completion chime',
     'notify.title': 'Completion chime',
-    'notify.intro': 'Play a short chime when a turn finishes. Settings live in this browser only; nothing is written to the profile.',
+    'notify.intro': 'Play a short chime (and optionally a system notification) when a turn finishes. Settings live in this browser only; nothing is written to the profile.',
     'cost.sectionLabel': 'Per-turn cost',
     'cost.title': 'Per-turn cost',
     'cost.intro': 'Show roughly what each turn cost under its reply, estimated from token usage and a price table. Settings live in this browser only; nothing is written to the profile.',
@@ -1345,6 +1480,15 @@
     'notify.scope.desc': 'Only the session you are looking at, or any session that finishes.',
     'notify.scope.all': 'All sessions',
     'notify.scope.current': 'Current session only',
+    'notify.system.title': 'Desktop notification',
+    'notify.system.desc': 'Raise a system notification when a turn finishes (no extra sound; the chime above owns audio). The browser must grant permission first; in the desktop app the banner carries the Harness identity.',
+    'notify.system.granted': 'Allowed',
+    'notify.system.denied': 'Blocked by the browser: allow notifications for this site in the browser settings',
+    'notify.system.default': 'Not requested yet',
+    'notify.system.unsupported': 'This environment does not support notifications',
+    'notify.system.test': 'Test notification',
+    'notify.system.notificationTitle': 'Turn finished',
+    'notify.system.notificationBody': 'A reply has finished',
     'cost.show.title': 'Show per-turn cost',
     'cost.show.desc': 'Estimated from token usage and the price table, shown under each reply; shows a dash when usage or pricing is unavailable.',
     'cost.unknownShort': '—',
@@ -3139,6 +3283,7 @@ let clientCtx
     const NotifySection = () => {
       const t = translate
       const [prefs, setPrefs] = useState(() => getObservePrefs())
+      const [permission, setPermission] = useState(() => notificationPermission())
 
       useEffect(() => {
         const onPrefs = () => setPrefs(getObservePrefs())
@@ -3148,6 +3293,35 @@ let clientCtx
 
       const update = (patch) => setPrefs(saveObservePrefs(patch))
       const preview = () => playCompletionChime(prefs.sound === 'none' ? 'chime' : prefs.sound, prefs.volume)
+
+      // 权限请求只能发生在用户手势里：勾选开关 / 点「测试通知」时申请，完成边沿只读现状。
+      const toggleSystemNotify = (event) => {
+        const checked = event?.target?.checked === true
+        if (!checked) {
+          update({ systemNotify: false })
+          return
+        }
+        void requestNotificationPermission().then((result) => {
+          setPermission(result)
+          update({ systemNotify: result === 'granted' })
+        })
+      }
+      const testSystemNotify = () => {
+        void requestNotificationPermission().then((result) => {
+          setPermission(result)
+          if (result === 'granted') {
+            showCompletionNotification('preview')
+            update({ systemNotify: true })
+          }
+        })
+      }
+      const permissionText = permission === 'unsupported'
+        ? t('notify.system.unsupported')
+        : permission === 'denied'
+          ? t('notify.system.denied')
+          : permission === 'granted'
+            ? t('notify.system.granted')
+            : t('notify.system.default')
 
       const row = (key, title, description, control) => react.createElement('div', { className: ROW_CLASS, key },
         react.createElement('div', { className: ROW_MAIN_CLASS },
@@ -3206,6 +3380,24 @@ let clientCtx
           },
             react.createElement('option', { value: 'all' }, t('notify.scope.all')),
             react.createElement('option', { value: 'current' }, t('notify.scope.current')))),
+        row('system', t('notify.system.title'), t('notify.system.desc'),
+          react.createElement('div', { className: OBSERVE_CONTROL_CLASS },
+            react.createElement('label', { className: OBSERVE_VALUE_CLASS },
+              react.createElement('input', {
+                type: 'checkbox',
+                checked: prefs.systemNotify === true,
+                disabled: permission === 'unsupported',
+                onChange: toggleSystemNotify,
+              }),
+              permissionText),
+            renderButton({
+              key: 'testSystemNotify',
+              variant: 'outline',
+              size: 'sm',
+              disabled: permission !== 'granted',
+              onClick: testSystemNotify,
+              children: t('notify.system.test'),
+            }))),
       ]
 
       return react.createElement('section', { className: SECTION_CLASS },
@@ -4005,10 +4197,17 @@ let clientCtx
       sounds: OBSERVE_SOUNDS,
       defaults: DEFAULT_OBSERVE_PREFS,
       builtinPricing: BUILTIN_PRICING,
+      /** 系统通知（与铃声同一行）：权限、主动申请、手动弹一条，供排障与测试。 */
+      systemNotify: {
+        supported: () => notificationCtor() !== null,
+        permission: () => notificationPermission(),
+        request: () => requestNotificationPermission(),
+        show: (sessionId) => showCompletionNotification(sessionId),
+      },
       /** 测试用：丢掉已缓存的 AudioContext，让下一次播放重新探测环境。 */
       resetAudio: () => { observeAudioContext = undefined },
-      /** 真机排障：已经真正发出声的次数（任务完成边沿是否触发过）。 */
-      stats: () => ({ chimes: observeChimeCount }),
+      /** 真机排障：已经真正发出声 / 弹出过通知的次数（完成边沿是否触发过）。 */
+      stats: () => ({ chimes: observeChimeCount, notifications: observeNotificationCount }),
     },
     restart: {
       phases: RESTART_PHASES,

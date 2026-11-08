@@ -3457,3 +3457,144 @@ test('组件探针：只关掉花费时，徽章与花费设置节都不注册�
     copy.restore()
   }
 })
+
+// ---------------------------------------------------------------------------
+// 系统通知（notify 行里的第二个子开关）：完成边沿、权限、点击跳转
+// ---------------------------------------------------------------------------
+
+/** 一个够用的 Notification 替身：记下每条通知与它的构造参数，并可按测试扭转权限。 */
+function installFakeNotification(permission, shown, requests) {
+  const original = globalThis.Notification
+  class FakeNotification {
+    constructor(title, options) {
+      this.title = title
+      this.options = options
+      shown.push(this)
+    }
+
+    close() {
+      this.closed = true
+    }
+  }
+  FakeNotification.permission = permission
+  FakeNotification.requestPermission = async () => {
+    requests.push(FakeNotification.permission)
+    if (FakeNotification.permission === 'default') FakeNotification.permission = 'granted'
+    return FakeNotification.permission
+  }
+  globalThis.Notification = FakeNotification
+  return { Fake: FakeNotification, restore: () => { globalThis.Notification = original } }
+}
+
+test('系统通知：完成边沿按会话弹一条，标题是会话名，点击跳回该会话', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const opened = []
+  const fake = installFakeNotification('granted', shown, requests)
+  try {
+    await loaded.apply(makeContext({
+      sessions: { list: { getSnapshot: () => ({ byId: { s1: { title: '修一个长任务' } } }) } },
+      uiWorkspace: { openSession: (id) => opened.push(id) },
+    }))
+    api.reset()
+    api.save({ systemNotify: true, chime: false, scope: 'all' })
+
+    // 页面刚打开：之前没有任何 running=true 的记录，不能把「现在在跑」当成「刚完成」。
+    api.notify(new Map(), new Map([['s1', { running: true }]]))
+    assert.equal(shown.length, 0, '首次快照不弹')
+
+    const before = api.stats().notifications
+    api.notify(new Map([['s1', { running: true }]]), new Map([['s1', { running: false }]]))
+    assert.equal(shown.length, 1, '完成时弹一条')
+    assert.equal(shown[0].title, '任务完成')
+    assert.equal(shown[0].options.body, '修一个长任务', '正文优先用会话标题')
+    assert.equal(shown[0].options.silent, true, '声音归铃声，通知不重复响')
+    assert.match(String(shown[0].options.tag), /s1$/, 'tag 按会话固定，重复完成是替换而不是堆叠')
+    assert.equal(api.stats().notifications, before + 1, '排障抓手要如实记下弹过几条')
+
+    shown[0].onclick()
+    assert.deepEqual(opened, ['s1'], '点通知要回到对应会话')
+    assert.equal(shown[0].closed, true, '点完关掉这条通知')
+    assert.equal(requests.length, 0, '★ 完成边沿绝不主动请求权限')
+  } finally {
+    fake.restore()
+    api.save({ systemNotify: false, chime: true })
+    api.reset()
+  }
+})
+
+test('系统通知：未授权或开关关掉时安静跳过，show() 如实返回 false', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const fake = installFakeNotification('default', shown, requests)
+  try {
+    api.reset()
+    api.save({ systemNotify: true, chime: false })
+
+    api.notify(new Map([['s2', { running: true }]]), new Map([['s2', { running: false }]]))
+    assert.equal(shown.length, 0, '没授权就不弹')
+    assert.equal(api.systemNotify.show('s2'), false, 'show() 在未授权时返回 false')
+
+    fake.Fake.permission = 'denied'
+    api.notify(new Map([['s2', { running: true }]]), new Map([['s2', { running: false }]]))
+    assert.equal(shown.length, 0, '被拒后也不弹')
+
+    fake.Fake.permission = 'granted'
+    api.save({ systemNotify: false })
+    api.notify(new Map([['s2', { running: true }]]), new Map([['s2', { running: false }]]))
+    assert.equal(shown.length, 0, '开关关掉就不弹')
+
+    api.save({ systemNotify: true })
+    api.notify(new Map([['s2', { running: true }]]), new Map([['s2', { running: false }]]))
+    assert.equal(shown.length, 1, '开关打开且已授权才弹')
+  } finally {
+    fake.restore()
+    api.save({ systemNotify: false, chime: true })
+    api.reset()
+  }
+})
+
+test('系统通知：权限只在主动调用时申请，已授权后不再反复请求', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const fake = installFakeNotification('default', shown, requests)
+  try {
+    api.reset()
+    assert.equal(api.systemNotify.supported(), true)
+    assert.equal(api.systemNotify.permission(), 'default')
+
+    const result = await api.systemNotify.request()
+    assert.equal(result, 'granted')
+    assert.equal(requests.length, 1, '第一次请求走浏览器授权')
+
+    assert.equal(await api.systemNotify.request(), 'granted')
+    assert.equal(requests.length, 1, '已授权后不再重复调用 requestPermission')
+  } finally {
+    fake.restore()
+    api.reset()
+  }
+})
+
+test('系统通知：设置节里能渲染开关与权限状态，未授权时也如实说明', async () => {
+  const api = observeApi()
+  const shown = []
+  const requests = []
+  const fake = installFakeNotification('default', shown, requests)
+  try {
+    await loaded.apply(makeContext())
+    const entry = registrations.find((item) => item.options.id === 'agent-control-notify')
+    assert.ok(entry, 'notify 行可用时要注册设置节')
+    const tree = renderComponent(entry.component, {})
+    const text = JSON.stringify(tree)
+    assert.match(text, /系统通知/, '要有系统通知这一行')
+    assert.match(text, /尚未授权/, '权限状态要如实显示')
+    assert.match(text, /测试通知/, '要有一个可以手动验证的按钮')
+  } finally {
+    fake.restore()
+    api.save({ systemNotify: false })
+    api.reset()
+  }
+})
