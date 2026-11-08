@@ -1394,7 +1394,7 @@ let clientCtx
    * 排障抓手 `window.__dshAgentControl.features()` 读的就是它的只读快照。
    */
   const featureAvailability = { session: null, turn: null, restart: null, notify: null, cost: null }
-  /** 四个探针的合集：只探一次，`apply` 与排障抓手读的是同一份结果。 */
+  /** 五个探针的合集：只探一次，`apply` 与排障抓手读的是同一份结果。 */
   let featureProbePromise
 
   /** 这一次探测到的组件开关（只读快照，供排障；`null` = 还没探到）。 */
@@ -1413,7 +1413,7 @@ let clientCtx
    * 任何异常（网络错误、非 2xx、超时、响应不是 JSON）都记成不可用。结果缓存在
    * `featureProbePromise` 里——`apply` 与排障抓手读的是同一次探测的结果。
    *
-   * @returns {Promise<void>} 四个探针都落定（不会 reject）。
+   * @returns {Promise<void>} 五个探针都落定（不会 reject）。
    */
   function probeFeatures() {
     if (featureProbePromise !== undefined) return featureProbePromise
@@ -3980,7 +3980,7 @@ let clientCtx
     /** 主按钮这次用的是原生 `Button` 还是自带兜底（排障与测试都靠它）。 */
     usingNativeButton: () => Button !== undefined,
     /**
-     * 这次挂载探测到的组件开关（只读快照）：`{ session, turn, restart }`，每个是
+     * 这次挂载探测到的组件开关（只读快照）：`{ session, turn, restart, notify, cost }`，每个是
      * `true` / `false` / `null`（`null` = 还没探到，按不可用处理）。
      * 排障用：界面上少了一个入口时，先看这里是不是 `false`。
      */
