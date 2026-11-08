@@ -1,6 +1,6 @@
 # PITFALLS：踩过的坑与实现细节
 
-[AGENTS.md](AGENTS.md) 第 4 节只留最容易重犯的三条，这里是全部的十一个坑，以及归档遮盖那段实现经过。换 harness 版本、改删除逻辑、或要弄清某处为什么这么写时读。本文件内容按 2026-10-15 从 AGENTS.md 原样搬移，只改了标题层级。
+[AGENTS.md](AGENTS.md) 第 4 节只留最容易重犯的三条，这里是全部的十二个坑，以及归档遮盖那段实现经过。换 harness 版本、改删除逻辑、或要弄清某处为什么这么写时读。本文件内容按 2026-10-15 从 AGENTS.md 原样搬移，只改了标题层级。
 
 ## 1. 踩过的坑（换 harness 版本时最容易重犯）
 
@@ -73,6 +73,17 @@
 - 根因：格式 v4 的加载校验器（`dsh-session-format-v3-to-v4` 的 `Relationships.requireStep`）要求 `system/message` / `developer/message` / `assistant/attempt` 落在**打开的 turn 与 step** 里、且编号一致。**运行中的内核 append 不查这条**，只在加载时查；墓碑写在已结束的轮次之后，当下一路绿灯，重启才炸。
 - 为什么没早发现：v1.0.0 的「真内核重放」没有走加载校验；假内核也没复刻这条规则；形状检查只看字段。三道防线都漏在同一处。
 - 结论：**「append 没抛错」不等于「日志合法」**。凡是往会话日志里写东西，都要对照**加载时**的格式校验器逐条核对，并且真机**重启后再打开一次**才算验证。现在改用与内核手动压缩同形的独立压缩事务（3.2），四道防线：host 写入前复算（没有打开的轮次/压缩）、假内核复刻加载规则与压缩不变量、诊断器的「事务检查」、用真实加载校验器离线模拟的 `test/v4-load-check.mjs`。
+
+**⑫ 系统通知的权限只能在用户手势里申请，完成边沿再申请一次也不会成功**
+
+- 现象：加上「一轮结束弹一条系统通知」之后，代码看着完全正确（`new Notification(title, {...})` 也执行到了），但一条通知都不出现，控制台没有任何报错；`Notification.permission` 永远停在 `default`。
+- 根因：浏览器的通知权限请求**必须发生在用户手势的调用栈里**。完成边沿是订阅回调（`uiSession.sessionStatus` 的快照变化），从那里调 `Notification.requestPermission()` 会被浏览器静默忽略——promise 以 `default` 结束，既不报错也不弹授权框。于是「每次完成顺手申请一次」的写法永远等不到授权。
+- 结论：**权限请求只放在用户真的点得到的两个地方**——设置页「系统通知」复选框的 `onChange` 与「测试通知」按钮；完成边沿只读 `Notification.permission`，`granted` 才弹，绝不主动请求。开关默认 `false`，没勾选就什么都不做。三条配套细节：
+  - `silent: true`：否则同一次完成会「铃声 + 通知提示音」响两下，声音只归铃声。
+  - `tag` 按会话固定（`dsh-agent-control:<sessionId>`）：没有 tag 时同一个会话连续完成会在通知中心堆一串，有 tag 则是替换。
+  - 拿不到 `Notification` 构造函数（`supported: false`）时如实显示「这个环境不支持系统通知」；用户拒绝授权时显示「已被浏览器阻止」，且不要每次完成再试一次——**降级方向是安静，不是假装弹过**。
+- 排障抓手：控制台里先看 `window.__dshAgentControl.observe.systemNotify.permission`，再用 `.show('<sessionId>')` 手动弹一条并看它返回 `true` / `false`；`observe.stats().notifications` 只在**真的弹出之后**才递增，用来区分「完成边沿没触发」和「触发了但被权限挡住」。
+- 换 harness / 宿主形态时要核对：网页版与 Electron 桌面版走**同一份代码**（通知的身份由承载页面的宿主决定），不要为桌面版改调 PowerShell / osascript 之类的系统通道。本版按上面这套实现，浏览器拒绝非手势请求这一点未在真机上复现（见 VERIFY 的「仍未验证」）。
 
 ### 需要重点盯的耦合面（预判，落地时逐条实测）
 
@@ -157,4 +168,4 @@ agent-control-restart (dsh-agent-control/restart): pending (waiting for service:
 五个组件行「**等待依赖**」而它们自己的开关仍是开着的——两级开关如实呈现；五条组件探针与 `/sessions` 全部 401，
 与未知路由的响应逐字相同（一个路由都没注册）。
 
-**浏览器端的开关同样只能「先探测、后注册」**：槽位一旦注册就不能在运行中卸载，所以客户端在挂载时先把五条组件探针各拉一次（`GET /api/agent-control/session/status`、`.../turn/status`、`.../restart/status`、`.../notify/status`、`.../cost/status`），探不到就不注册对应槽位、也不订阅铃声；方向永远是「少显示」——宁可少一个入口，也不要留一个点了报错的按钮。这条对 notify 与 cost 两行尤其重要：它们的功能全在浏览器里，host 端没有可回退的路由，判据只能来自各自的探针（见 AGENTS.md 3.11、3.12）。
+**浏览器端的开关同样只能「先探测、后注册」**：槽位一旦注册就不能在运行中卸载，所以客户端在挂载时先把五条组件探针各拉一次（`GET /api/agent-control/session/status`、`.../turn/status`、`.../restart/status`、`.../notify/status`、`.../cost/status`），探不到就不注册对应槽位、也不订阅完成事件（铃声与系统通知一起下线）；方向永远是「少显示」——宁可少一个入口，也不要留一个点了报错的按钮。这条对 notify 与 cost 两行尤其重要：它们的功能全在浏览器里，host 端没有可回退的路由，判据只能来自各自的探针（见 AGENTS.md 3.11、3.12）。

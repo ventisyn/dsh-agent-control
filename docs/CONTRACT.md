@@ -17,7 +17,7 @@ POST /api/agent-control/session/delete         # { sessionId }
 POST /api/agent-control/turn/delete            # { sessionId, assistantMessageId }
 GET  /api/agent-control/turn/status            # 「轮次」组件的只读探针（同上）
 GET  /api/agent-control/notify/status          # 「任务完成提醒」组件的只读探针（同上）；这一行在 host 端**只有这一条路由**
-                                               # 没有 POST、没有请求体、没有模型工具——铃声在浏览器里（第 6 节）
+                                               # 没有 POST、没有请求体、没有模型工具——铃声与系统通知都在浏览器里（第 6 节）
 GET  /api/agent-control/cost/status            # 「每轮花费」组件的只读探针（同上）；这一行同样**只有这一条路由**
                                                # 没有 POST、没有请求体、没有模型工具——花费也在浏览器里（第 6 节）
 GET  /api/agent-control/restart/status         # { ok, bootId, pid, startedAt, port, canRestart, unsupportedReason?,
@@ -78,7 +78,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 
 ## 4. 数据与运行环境（AGENTS.md 3.8）
 
-**这个插件自己不落任何数据文件**：没有配置、没有审计日志、没有缓存。唯一的持久事实是它写进会话日志的**墓碑**，那份数据归会话自己所有。删除操作的可观测性靠 harness 日志与接口响应，不要为了「看着专业」造一份本地流水。**唯一的例外在浏览器里**：提醒与花费两个组件的设置（铃声、音量、范围、花费开关、自定义价目表）键在 `localStorage` 的 `dsh-agent-control:observe` 下——**两行共用这一份**（`observe` 只是内部统称，插件列表里没有叫它的行），它属于那个浏览器，不进 profile、不写磁盘文件，换浏览器就回到默认值（第 6 节）。
+**这个插件自己不落任何数据文件**：没有配置、没有审计日志、没有缓存。唯一的持久事实是它写进会话日志的**墓碑**，那份数据归会话自己所有。删除操作的可观测性靠 harness 日志与接口响应，不要为了「看着专业」造一份本地流水。**唯一的例外在浏览器里**：提醒与花费两个组件的设置（铃声、音量、范围、系统通知开关、花费开关、自定义价目表）键在 `localStorage` 的 `dsh-agent-control:observe` 下——**两行共用这一份**（`observe` 只是内部统称，插件列表里没有叫它的行），它属于那个浏览器，不进 profile、不写磁盘文件，换浏览器就回到默认值（第 6 节）。
 
 **唯一的受控例外：热重启的交接文件**（`<DSH_HOME>/agent-control/restart/`）。理由是这个功能**必须跨进程边界传递状态**——旧进程在退出前要把「重启后该做什么」交给一个还不存在的新进程，除了磁盘没有别的通道：
 
@@ -170,7 +170,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
     `store`），所以主入口 apply 时兄弟们已经在树上了。
 - 五个组件的接线**只有一份实现**（`src/host-wiring.mjs` 的 `applySessionFeature` / `applyTurnFeature` /
   `applyRestartFeature` / `applyNotifyFeature` / `applyCostFeature`）：主入口与五个子插件行调用的是同一份，子插件各自只调用自己那一个。
-  `applyNotifyFeature` 与 `applyCostFeature` 各只注册一条只读探针，其余全在浏览器里（见本节末尾「notify 与 cost 两行」）。
+  `applyNotifyFeature` 与 `applyCostFeature` 各只注册一条只读探针；notify 行的铃声与系统通知、cost 行的花费都在浏览器里（见本节末尾「notify 与 cost 两行」）。
 - **认领表**（`claimFeature`）挡住同一进程里的重复注册：`webServer.register` 对同一个 `(kind, path)`
   会抛错，工具也不该注册两次。先到先得、后到的跳过（只在 debug / info 级留一行线索），认领在
   `ctx.effect` 的清理里释放，所以热重载后还能注册回去。离线测试用
@@ -189,14 +189,15 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 
 ### notify 与 cost 两行（提醒与花费）
 
-这两个组件行是五个组件行里**没有状态变更路由**的两行：`agent-control-notify` 承载任务完成铃声，`agent-control-cost` 承载每轮回复下方的花费估算。两件事互不相干（要铃声不要花费、或反过来都是常见用法），所以是两个**独立开关**，各有一条只读探针、各注册自己的界面入口。内部仍沿用 `observe` 作统称（`localStorage` 键与排障抓手 `window.__dshAgentControl.observe`），但**插件列表里没有叫 `observe` 的行**。
+这两个组件行是五个组件行里**没有状态变更路由**的两行：`agent-control-notify` 承载任务完成提醒（铃声 + 可选的系统通知），`agent-control-cost` 承载每轮回复下方的花费估算。两件事互不相干（要铃声不要花费、或反过来都是常见用法），所以是两个**独立开关**，各有一条只读探针、各注册自己的界面入口。内部仍沿用 `observe` 作统称（`localStorage` 键与排障抓手 `window.__dshAgentControl.observe`），但**插件列表里没有叫 `observe` 的行**。
 
 - **host 端各只有一条只读探针**：`GET /api/agent-control/notify/status` 与 `GET /api/agent-control/cost/status`，都返回 `{ ok: true, enabled: true }`。没有 POST、没有请求体、没有模型工具——两行都不参与删除与重启那套确认、错误码与可信校验，那几个机制是给破坏性操作用的。
 - **客户端三个槽位条目，按各自探针分别注册**：cost 行的每轮花费徽章挂在 `conversation.chat.turnTail`（`id: agent-control-turn-cost`，`order: 100`；它前面是轮次组件的已删轮次隐藏标记，`order: 90`）；notify 行的设置节进入 `settings.section`（`id: agent-control-notify`，`order: 510`）；cost 行的设置节同样进入 `settings.section`（`id: agent-control-cost`，`order: 520`）。热重启那一节是 `order: 500`。全部**先探测、后注册**（槽位一旦注册无法在运行中卸载），探不到对应行就不注册它那部分入口。
-- **设置只存 `localStorage`**（键 `dsh-agent-control:observe`，**两行共用一份设置对象**：铃声开关 / 音效 / 音量 / 范围与花费开关 / 自定义价目表在同一个对象里，界面上分成两节）：插件仍然不落数据文件；关掉一行只是不订阅、不注册，不清那份设置。
+- **设置只存 `localStorage`**（键 `dsh-agent-control:observe`，**两行共用一份设置对象**：铃声开关 / 音效 / 音量 / 范围 / 系统通知开关（`systemNotify`，缺字段按 `false` 处理）与花费开关 / 自定义价目表在同一个对象里，界面上分成两节）：插件仍然不落数据文件；关掉一行只是不订阅、不注册，不清那份设置。
 - **数据来源**：notify 订阅 `uiSession.sessionStatus`，用 `running` 的 true → false 边沿判定（首次快照与重复快照都不响，子代理会话不响）；cost 读 Chat 发布在 `conversation.chat.turnTail` 的 `turn-tail.tokenUsage`（`uncachedInputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `outputTokens` 与 `routes`）。两者都是宿主公开面，但字段名要在活页面核对。
 - **金额是估算**：价目表内置 DeepSeek 公开价（高峰 / 空闲两档），峰谷按北京时间工作日 09:00–12:00、14:00–18:00 判定；节假日按工作日算（会高估）；未知模型显示「—」。它是**估算**，不是账单——README 与界面文案都必须这么写。
 - **音频需要一次用户手势**：没有用户手势时音频上下文起不来，铃声静默降级。
+- **系统通知（同一行里的子开关）**：纯客户端 `Notification` API（不调 PowerShell / osascript，网页版与桌面版同一份代码，桌面版里的通知身份由承载页面的宿主决定）。默认 `false`；设置项 `systemNotify`，`normalizeObservePrefs` 只认 `source.systemNotify === true`。**权限只能从用户手势发起**：设置页复选框的 `onChange` 与「测试通知」按钮调 `requestNotificationPermission()`；完成边沿只读 `Notification.permission`，`granted` 才弹，绝不主动请求。通知形状：title「任务完成」、body 是会话标题（拿不到标题时「一轮回复已经结束」）、`silent: true`（声音归铃声）、`tag` 为 `dsh-agent-control:<sessionId>`（同一会话替换而不是堆叠）；点击通知聚焦窗口并调用 `uiWorkspace.openSession(sessionId)`。排障抓手 `window.__dshAgentControl.observe.systemNotify = { supported, permission, request, show }`，计数在 `observe.stats().notifications`。`client.js` 内嵌 `MESSAGES` 的 `notify.system.*`（zh / en）与 `locale/notify/{zh,en}.json` 的 `meta.description` 同步描述它。
 
 ## 7. 本地联调与 profile 装/摘（AGENTS.md 第 5 节）
 
