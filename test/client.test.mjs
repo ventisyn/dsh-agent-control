@@ -3428,7 +3428,7 @@ test('完成铃声：只在 running 由真变假的边沿响一次，首次快�
   }
 })
 
-test('每轮花费徽章：有精确用量时显示金额，点开是官方风格的明细浮层', async () => {
+test('每轮花费徽章：有精确用量时显示金额，设置里关掉后不渲染', async () => {
   await loaded.apply(makeContext())
   const entry = registrations.find((item) => item.options.id === 'agent-control-turn-cost')
   assert.ok(entry, 'observe 可用时要注册花费徽章')
@@ -3450,63 +3450,11 @@ test('每轮花费徽章：有精确用量时显示金额，点开是官方风�
     api.save({ cost: true, pricing: null })
     const tree = renderComponent(entry.component, { turn })
     assert.ok(tree, '应当渲染花费徽章')
-    const button = tree.children?.[0]
-    assert.equal(button?.type, 'button', '徽章是一个按钮（与官方用量按钮同款）')
-    assert.equal(button?.props?.['data-agent-control-turn-cost'], 'known')
-    assert.equal(button?.props?.['aria-haspopup'], 'dialog')
-    assert.match(String(button?.children?.at(-1) ?? ''), /^¥/, '徽章上显示的是一行金额')
-
-    button.props.onClick()
-    const opened = renderUntilStable(entry.component, { turn })
-    const panel = opened.children?.[1]
-    assert.ok(panel, '点击后要弹出明细浮层')
-    assert.equal(panel.type, 'div')
-    assert.equal(panel.props.role, 'dialog')
-    const text = JSON.stringify(panel)
-    assert.match(text, /本轮花费/, '浮层标题')
-    assert.match(text, /1,000,000 tok/, '浮层里列出 token 桶')
-    assert.match(text, /tok · ¥[0-9.]+\/M/, '浮层里列出单价')
-    assert.match(text, /估算，不是账单/, '浮层里说明这是估算')
+    assert.equal(tree.props['data-agent-control-turn-cost'], 'known')
+    assert.match(String(tree.children?.[0] ?? ''), /^¥/, '徽章上显示的是一行金额')
 
     api.save({ cost: false })
     assert.equal(renderComponent(entry.component, { turn }), null, '关掉每轮花费后不渲染')
-  } finally {
-    api.save({ cost: true, pricing: null })
-    api.reset()
-  }
-})
-
-test('每轮花费徽章：未知模型显示「—」，点开能看到 token 用量与补价提示', async () => {
-  await loaded.apply(makeContext())
-  const entry = registrations.find((item) => item.options.id === 'agent-control-turn-cost')
-  const turn = {
-    turn: 4,
-    data: {
-      get: () => ({
-        tokenUsage: {
-          uncachedInputTokens: 10,
-          outputTokens: 5,
-          routes: [{ provider: 'openrouter', model: 'acme/unknown-model-9' }],
-        },
-      }),
-      source: () => undefined,
-    },
-  }
-  const api = observeApi()
-  try {
-    api.save({ cost: true, pricing: null })
-    const tree = renderComponent(entry.component, { turn })
-    const button = tree.children?.[0]
-    assert.equal(button?.props?.['data-agent-control-turn-cost'], 'unknown')
-    assert.equal(String(button?.children?.at(-1)), '—')
-
-    button.props.onClick()
-    const opened = renderUntilStable(entry.component, { turn })
-    const panel = opened.children?.[1]
-    assert.ok(panel, '未知模型也要能点开明细')
-    const text = JSON.stringify(panel)
-    assert.match(text, /10 tok/, '列出 token 用量')
-    assert.match(text, /填一条|价格/, '提示怎么补价格')
   } finally {
     api.save({ cost: true, pricing: null })
     api.reset()

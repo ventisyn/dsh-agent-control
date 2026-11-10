@@ -248,13 +248,6 @@
 
   /** 设置页里那套控件与花费徽章的样式类（追加进 STYLE_CSS）。 */
   const COST_CLASS = 'dsh-agent-control-cost'
-  const COST_WRAP_CLASS = 'dsh-agent-control-cost-wrap'
-  const COST_PANEL_CLASS = 'dsh-agent-control-cost-panel'
-  const COST_PANEL_TITLE_CLASS = 'dsh-agent-control-cost-panel-title'
-  const COST_PANEL_LABEL_CLASS = 'dsh-agent-control-cost-panel-label'
-  const COST_PANEL_VALUE_CLASS = 'dsh-agent-control-cost-panel-value'
-  const COST_PANEL_RULE_CLASS = 'dsh-agent-control-cost-panel-rule'
-  const COST_PANEL_DETAILS_CLASS = 'dsh-agent-control-cost-panel-details'
   const OBSERVE_CONTROL_CLASS = 'dsh-agent-control-observe-control'
   const OBSERVE_VALUE_CLASS = 'dsh-agent-control-observe-value'
   const OBSERVE_SELECT_CLASS = 'dsh-agent-control-observe-select'
@@ -410,52 +403,6 @@
       pricingKey: lookup.key,
       matched: lookup.matched,
     }
-  }
-
-  /** token 数量的千分位写法（明细浮层里用）。 */
-  function formatTokenCount(value) {
-    const number = Number.isFinite(value) ? Math.round(value) : 0
-    return String(number).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-  }
-
-  /** 缓存命中率（%）：命中读 / 全部输入桶；没有输入时返回 null。 */
-  function cacheHitRate(buckets) {
-    const total = (buckets.uncachedInput ?? 0) + (buckets.cacheRead ?? 0) + (buckets.cacheWrite ?? 0)
-    if (total <= 0) return null
-    return Math.round(((buckets.cacheRead ?? 0) / total) * 1000) / 10
-  }
-
-  /** 明细浮层里的「键 / 值」两列（有序：路由、缓存命中、四个桶、合计、依据、说明）。 */
-  function costDetailRows(result, t) {
-    const rows = []
-    if (result.route !== null) rows.push([t('cost.route'), `${result.route.provider}/${result.route.model}`])
-    if (result.known !== true) {
-      const buckets = result.buckets ?? {}
-      rows.push([t('cost.uncachedInput'), `${formatTokenCount(buckets.uncachedInput)} tok`])
-      rows.push([t('cost.cacheRead'), `${formatTokenCount(buckets.cacheRead)} tok`])
-      if ((buckets.cacheWrite ?? 0) > 0) rows.push([t('cost.cacheWrite'), `${formatTokenCount(buckets.cacheWrite)} tok`])
-      rows.push([t('cost.output'), `${formatTokenCount(buckets.output)} tok`])
-      rows.push([t('cost.note'), t('cost.unknownPanelHint')])
-      return rows
-    }
-    const symbol = symbolOf(result.currency)
-    const band = result.band
-    const hit = cacheHitRate(result.buckets)
-    if (hit !== null) rows.push([t('cost.cacheHit'), `${hit}%`])
-    rows.push([t('cost.uncachedInput'), `${formatTokenCount(result.buckets.uncachedInput)} tok · ${symbol}${band.input}/M`])
-    rows.push([t('cost.cacheRead'), `${formatTokenCount(result.buckets.cacheRead)} tok · ${symbol}${band.cacheRead}/M`])
-    if (result.buckets.cacheWrite > 0) {
-      rows.push([t('cost.cacheWrite'), `${formatTokenCount(result.buckets.cacheWrite)} tok · ${symbol}${band.cacheWrite}/M`])
-    }
-    rows.push([t('cost.output'), `${formatTokenCount(result.buckets.output)} tok · ${symbol}${band.output}/M`])
-    rows.push([t('cost.total'), formatCost(result.cost, result.currency)])
-    if (result.matched !== 'exact') {
-      rows.push([t('cost.basis'), t('cost.pricingFromShort').replace('{key}', String(result.pricingKey ?? ''))])
-    } else if (result.currency === 'CNY') {
-      rows.push([t('cost.basis'), result.peak ? t('cost.peakShort') : t('cost.offPeakShort')])
-    }
-    rows.push([t('cost.note'), t('cost.estimated')])
-    return rows
   }
 
   /** 金额文案：小于 1 元保留四位，大于等于 1 元保留两位，极小的金额不写成 0。 */
@@ -1153,39 +1100,11 @@
     // 提醒与花费（observe 组件）。两个功能都只在浏览器里：花费徽章挂在轮次尾部，
     // 设置页那几行沿用本文件已有的 ROW/SECTION 类；颜色一律走 token，明暗主题自动成立。
     // ---------------------------------------------------------------------
-    // 徽章：与官方轮次尾部的「用量」按钮同款（12px / 28px 高 / 8px 圆角 / tertiary 色 / 透明底），
-    // 悬停与展开时用官方同款的交互背景。
-    '`.${COST_WRAP_CLASS}{display:inline-flex;align-items:center}',
-    '`.${COST_CLASS}{display:inline-flex;align-items:center;gap:4px;min-width:0;'
-      + 'height:calc(28px + var(--dsh-content-font-delta,0px));box-sizing:border-box;padding:0 8px;'
-      + 'border:0;border-radius:var(--dsw-radius-sm);background:0 0;color:var(--dsw-alias-label-tertiary);'
-      + 'font:inherit;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);'
-      + 'line-height:calc(24px + var(--dsh-content-font-delta,0px));font-variant-numeric:tabular-nums;'
-      + 'white-space:nowrap;cursor:pointer;transition:background .12s ease}',
-    '`.${COST_CLASS}:hover{background:var(--dsw-alias-interactive-bg-hover)}',
-    '`.${COST_CLASS}[aria-expanded="true"]{background:var(--dsw-alias-interactive-bg-hover)}',
-    '`.${COST_CLASS}:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
-    '`.${COST_CLASS}[data-agent-control-turn-cost="unknown"]{color:var(--dsw-alias-label-quaternary,var(--dsw-alias-label-tertiary))}',
-    '`.${COST_CLASS} svg{flex:0 0 auto;width:calc(15px + var(--dsh-content-font-delta,0px));'
-      + 'height:calc(15px + var(--dsh-content-font-delta,0px))}',
-    // 明细浮层：照官方「本轮用量」面板的 token 用法（menu 背景 + lg 圆角 + 16px 内边距 + 描边阴影）。
-    '`.${COST_PANEL_CLASS}{position:fixed;z-index:1100;box-sizing:border-box;padding:16px;'
-      + 'border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);'
-      + 'backdrop-filter:var(--dsw-menu-backdrop-filter);'
-      + 'box-shadow:0 0 0 .5px var(--dsw-alias-border-l2),0 4px 16px rgba(0,0,0,.16);'
-      + 'width:max-content;min-width:min(300px,calc(100vw - 24px));max-width:min(440px,calc(100vw - 24px));'
-      + 'color:var(--dsw-alias-label-tertiary)}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_TITLE_CLASS}{display:flex;align-items:center;justify-content:space-between;'
-      + 'gap:16px;margin-bottom:8px;color:var(--dsw-alias-label-primary);font-weight:500}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_LABEL_CLASS}{display:inline-flex;align-items:center;gap:6px;min-width:0}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_LABEL_CLASS} svg{flex:0 0 auto;width:14px;height:14px}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_VALUE_CLASS}{font-variant-numeric:tabular-nums}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_RULE_CLASS}{border-top:.5px solid var(--dsw-alias-border-l2);margin-bottom:10px}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_DETAILS_CLASS}{display:grid;'
-      + 'grid-template-columns:minmax(76px,auto) minmax(0,1fr);gap:6px 16px;margin:0}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_DETAILS_CLASS} dt,.${COST_PANEL_CLASS} .${COST_PANEL_DETAILS_CLASS} dd{min-width:0;margin:0}',
-    '`.${COST_PANEL_CLASS} .${COST_PANEL_DETAILS_CLASS} dd{color:var(--dsw-alias-label-secondary);'
-      + 'font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}',
+    '`.${COST_CLASS}{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;padding:2px 6px;'
+      + 'border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);'
+      + 'border:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);'
+      + 'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;white-space:nowrap}`',
+    '`.${COST_CLASS}[data-agent-control-turn-cost="unknown"]{opacity:.7}`',
     '`.${OBSERVE_CONTROL_CLASS}{display:flex;align-items:center;gap:10px;flex:none}`',
     '`.${OBSERVE_VALUE_CLASS}{color:var(--dsw-alias-label-secondary);min-width:38px;text-align:right;'
       + 'font-size:12px;line-height:18px;font-variant-numeric:tabular-nums}`',
@@ -1560,16 +1479,6 @@
     'cost.pricingFrom': '按「{key}」的公开价估算（聚合 provider 可能加价）',
     'cost.usageLine': 'token（未命中 / 缓存读 / 缓存写 / 输出）',
     'cost.unknownHint': '在设置页给这个模型填一个价格，就能显示金额',
-    'cost.panelTitle': '本轮花费',
-    'cost.route': '提供方 / 模型',
-    'cost.cacheHit': '缓存命中',
-    'cost.basis': '计价依据',
-    'cost.note': '说明',
-    'cost.pricingFromShort': '按「{key}」的公开价估算',
-    'cost.peakShort': 'DeepSeek 高峰价',
-    'cost.offPeakShort': 'DeepSeek 空闲价',
-    'cost.estimated': '估算，不是账单',
-    'cost.unknownPanelHint': '未收录这个模型的价格，在设置页「每轮花费」填一条就能显示金额',
     'cost.uncachedInput': '输入（未命中缓存）',
     'cost.cacheRead': '输入（命中缓存）',
     'cost.cacheWrite': '输入（写缓存）',
@@ -1758,16 +1667,6 @@
     'cost.pricingFrom': 'Estimated from the public price of "{key}" (aggregators may add a markup)',
     'cost.usageLine': 'tokens (uncached / cache read / cache write / output)',
     'cost.unknownHint': 'Add a price for this model in the settings section to show an amount',
-    'cost.panelTitle': 'Turn cost',
-    'cost.route': 'Provider / model',
-    'cost.cacheHit': 'Cache hit',
-    'cost.basis': 'Pricing basis',
-    'cost.note': 'Note',
-    'cost.pricingFromShort': 'estimated from the public price of "{key}"',
-    'cost.peakShort': 'DeepSeek peak price',
-    'cost.offPeakShort': 'DeepSeek off-peak price',
-    'cost.estimated': 'Estimate, not a bill',
-    'cost.unknownPanelHint': 'No price for this model; add one in the per-turn cost section to show an amount',
     'cost.uncachedInput': 'Input (cache miss)',
     'cost.cacheRead': 'Input (cache hit)',
     'cost.cacheWrite': 'Input (cache write)',
@@ -3507,24 +3406,11 @@ let clientCtx
       )
     }
 
-    /** 花费徽章的小图标：硬币轮廓 + ¥ 的两横一竖，颜色跟随 currentColor。 */
-    const costIcon = (size) => react.createElement('svg', {
-      width: size,
-      height: size,
-      viewBox: '0 0 16 16',
-      'aria-hidden': 'true',
-      focusable: 'false',
-    },
-      react.createElement('circle', { cx: 8, cy: 8, r: 6.4, fill: 'none', stroke: 'currentColor', strokeWidth: 1.1 }),
-      react.createElement('path', { d: 'M6 5.4h4M6 8h4M8 5.4v5.2', fill: 'none', stroke: 'currentColor', strokeWidth: 1.1, strokeLinecap: 'round' }),
-    )
-
     /**
      * 一轮回复下方的「这一轮花了多少钱」。
      *
-     * 视觉与官方轮次尾部的「用量」按钮同款；点开是一个官方风格的明细浮层
-     * （title + 分隔线 + 两列 dl），列出金额、路由、缓存命中率、四个 token 桶的单价与合计。
-     * 用量来自 Chat 发布在 `turn-tail` 上的精确统计，拿不到就不显示，不猜数字。
+     * 用量来自 Chat 发布在 `turn-tail` 上的精确统计（`deriveTurnTokenUsage`，含路由），
+     * 这里只按价目表折算——拿不到用量就不显示，不猜数字。
      */
     const TurnCost = (props) => {
       const turn = props.turn
@@ -3532,10 +3418,6 @@ let clientCtx
       // 下面那个版本号只负责在设置变化时把真实 React 叫起来重渲染。
       const [, setPrefsVersion] = useState(0)
       const [tail, setTail] = useState(() => readTurnTail(turn))
-      const [open, setOpen] = useState(false)
-      const [placement, setPlacement] = useState(null)
-      const anchorRef = useRef(null)
-      const panelRef = useRef(null)
 
       useEffect(() => {
         const onPrefs = () => setPrefsVersion((version) => version + 1)
@@ -3553,100 +3435,16 @@ let clientCtx
           : undefined
       }, [turn])
 
-      // 浮层打开后：点外面或按 Esc 收起，与官方浮层的行为一致。
-      useEffect(() => {
-        if (!open) return undefined
-        const doc = globalThis.document
-        if (doc === null || doc === undefined || typeof doc.addEventListener !== 'function') return undefined
-        const onPointer = (event) => {
-          const anchor = anchorRef.current
-          const panel = panelRef.current
-          const target = event?.target
-          if (anchor !== null && typeof anchor.contains === 'function' && anchor.contains(target)) return
-          if (panel !== null && typeof panel.contains === 'function' && panel.contains(target)) return
-          setOpen(false)
-        }
-        const onKey = (event) => {
-          if (event?.key === 'Escape') setOpen(false)
-        }
-        doc.addEventListener('mousedown', onPointer)
-        doc.addEventListener('keydown', onKey)
-        return () => {
-          doc.removeEventListener('mousedown', onPointer)
-          doc.removeEventListener('keydown', onKey)
-        }
-      }, [open])
-
       if (getObservePrefs().cost !== true) return null
       const result = computeTurnCost(tail?.tokenUsage)
       if (result === null) return null
-
-      const known = result.known === true
-      const amount = known ? formatCost(result.cost, result.currency) : translate('cost.unknownShort')
-      const t = translate
-
-      const toggle = () => {
-        if (open) {
-          setOpen(false)
-          return
-        }
-        const anchor = anchorRef.current
-        if (anchor !== null && typeof anchor.getBoundingClientRect === 'function') {
-          try {
-            const rect = anchor.getBoundingClientRect()
-            const width = 300
-            const height = 300
-            const viewportWidth = Number(globalThis.innerWidth) || 0
-            const viewportHeight = Number(globalThis.innerHeight) || 0
-            const left = viewportWidth > 0
-              ? Math.max(8, Math.min(rect.left, viewportWidth - width - 12))
-              : rect.left
-            const below = rect.bottom + 6
-            const top = viewportHeight > 0 && below + height > viewportHeight - 8
-              ? Math.max(8, rect.top - height - 6)
-              : below
-            setPlacement({ left, top })
-          } catch {
-            setPlacement(null)
-          }
-        }
-        setOpen(true)
-      }
-
-      const rows = costDetailRows(result, t)
-      const panel = open
-        ? react.createElement('div', {
-          className: COST_PANEL_CLASS,
-          role: 'dialog',
-          'aria-label': t('cost.panelTitle'),
-          ref: panelRef,
-          style: placement !== null ? { left: placement.left + 'px', top: placement.top + 'px' } : undefined,
-        },
-          react.createElement('div', { className: COST_PANEL_TITLE_CLASS },
-            react.createElement('span', { className: COST_PANEL_LABEL_CLASS },
-              costIcon(14),
-              t('cost.panelTitle')),
-            react.createElement('span', { className: COST_PANEL_VALUE_CLASS }, amount)),
-          react.createElement('div', { className: COST_PANEL_RULE_CLASS, 'aria-hidden': 'true' }),
-          react.createElement('dl', { className: COST_PANEL_DETAILS_CLASS },
-            ...rows.flatMap(([key, value]) => [
-              react.createElement('dt', { key: 'dt-' + key }, key),
-              react.createElement('dd', { key: 'dd-' + key }, value),
-            ])))
-        : null
-
-      return react.createElement('span', { className: COST_WRAP_CLASS },
-        react.createElement('button', {
-          type: 'button',
-          ref: anchorRef,
-          className: COST_CLASS,
-          'data-agent-control-turn-cost': known ? 'known' : 'unknown',
-          'aria-haspopup': 'dialog',
-          'aria-expanded': open ? 'true' : 'false',
-          'aria-label': t('cost.panelTitle') + ' ' + amount,
-          onClick: toggle,
-        }, costIcon(15), amount),
-        panel)
+      const detail = describeTurnCost(result)
+      return react.createElement('span', {
+        className: COST_CLASS,
+        'data-agent-control-turn-cost': result.known ? 'known' : 'unknown',
+        title: detail,
+        'aria-label': detail,
+      }, result.known ? formatCost(result.cost, result.currency) : translate('cost.unknownShort'))
     }
 
     /**
