@@ -56,14 +56,14 @@
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与五个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 335 项离线测试
+npm test                                                          # node --check + 337 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 88、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 335 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 90、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 337 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -221,7 +221,10 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 - **host 端只有一条只读探针** `GET /api/agent-control/cost/status`：没有 POST 路由、没有请求体、没有模型工具。关掉这一行时路由不存在，客户端就不注册花费徽章、也不注册设置页那一节。
 - **数据来源**：Chat 发布在 `conversation.chat.turnTail` 槽位上的 `turn-tail.tokenUsage`（`uncachedInputTokens` / `cacheReadTokens` / `cacheWriteTokens` / `outputTokens` 与 `routes`），乘一份价目表；金额显示在每轮回复下方（小于 1 元保留四位，例如 `¥0.0061`）。拿不到用量、或模型不在价目表里 → 显示「—」，不猜价格。
 - **峰谷按北京时间工作日判定**：周一至周五 09:00–12:00、14:00–18:00 是高峰，其余时段（含周末）按空闲价。**节假日没有公开的机器可读日历，按工作日算**，所以节假日会高估一倍；时区信息拿不到时也按高峰（高估）。宁可高估也不要低估。
-- **价目表**：内置 DeepSeek 官方公开价（每百万 token）：`deepseek-flash` 高峰 输入 2 / 缓存命中 0.04 / 输出 8，空闲减半；`deepseek-v4-pro` 高峰 9 / 0.3 / 27，空闲减半。`cacheWrite` 记 0（DeepSeek 不报告这一桶）。设置页可以用 JSON 按 `provider/model` 覆盖或补充；未知模型显示「—」。
+- **价目表**（两套，查表顺序见 3.12 的实现说明）：
+  - **provider 级**：内置 DeepSeek 官方公开价（每百万 token）：`deepseek-flash` 高峰 输入 2 / 缓存命中 0.04 / 输出 8，空闲减半；`deepseek-v4-pro` 高峰 9 / 0.3 / 27，空闲减半。`cacheWrite` 记 0（DeepSeek 不报告这一桶）。
+  - **模型级（美元）**：覆盖 OpenAI / Anthropic / Google / xAI / DeepSeek 的常见模型，按**归一化模型名**匹配（去掉 provider 前缀、点号换横线、去日期与 `-latest` 后缀），所以 OpenRouter 的 `anthropic/claude-opus-5.5` 这类 `provider/model` 也能算出金额；聚合 provider 可能加价，金额仍标估算。
+  - 设置页可以用 JSON 覆盖或补充（键可以是 `provider/model` 或模型名）；未知模型显示「—」，悬停时给出 token 用量与「填价格」的提示。
 - **金额是估算，不是账单**：多路由的一轮按第一个路由估算；官方价格会变，内置表只是默认值。README 与界面文案都必须这么写。
 - **客户端两个槽位**：`conversation.chat.turnTail` 的第二个条目（每轮花费徽章，order 100，紧跟「已删轮次」隐藏标记的 order 90）与 `settings.section` 的「每轮花费」一节（order 520，排在提醒那一节之后）。两者都在探到 cost 行可用之后才注册。
 - **设置与 notify 行共用**同一份 `localStorage` 设置（键 `dsh-agent-control:observe`，含 notify 行的 `systemNotify`），不进 profile、不落文件——插件仍然只有「会话日志」这一份持久事实（3.8）。换浏览器或清站点数据就回到默认值。

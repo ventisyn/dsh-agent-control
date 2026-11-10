@@ -121,7 +121,7 @@ DeepSeek Harness（DSH）插件：把三件会改变实例现状的**破坏性�
 只有 `cost` 那一行（`dsh-agent-control/cost`）可用时才出现，同样只有一条只读探针 `GET /api/agent-control/cost/status`（没有 POST 路由、没有模型工具）。
 
 - 读取 Chat 已经算好的精确 token 用量（未命中缓存的输入 / 缓存命中 / 缓存写入 / 输出），乘一份价目表，把金额显示在每轮回复下方（小于 1 元保留四位，例如 `¥0.0061`）。金额是**估算**，不是账单：
-  - 价目表内置 DeepSeek 官方公开价（每百万 token，区分高峰与空闲两档），可在设置页「每轮花费」一节（`settings.section`，order 520）用 JSON 按 `provider/model` 覆盖或补充；未知模型显示「—」，绝不猜价格。
+  - 价目表分两套：**DeepSeek 官方价**（人民币，区分高峰与空闲两档）与**常见模型的公开美元价**（OpenAI / Anthropic / Google / xAI / DeepSeek，按模型名匹配——自动去掉 provider 前缀、版本点号与日期后缀，所以 OpenRouter 的 `anthropic/claude-opus-5.5` 这类路由也能算）。可在设置页「每轮花费」一节（`settings.section`，order 520）用 JSON 按 `provider/model` 或模型名覆盖或补充；未知模型显示「—」，悬停给出 token 用量，绝不猜价格。
   - 峰谷按北京时间判定：工作日 09:00–12:00、14:00–18:00 为高峰，其余时段（含周末）按空闲价。⚠️ 节假日没有公开的机器可读日历，按工作日算，因此节假日会高估一倍；宁可高估也不低估。
   - 一轮跨多个模型时按第一个路由估算；官方价格调整后内置表可能滞后，请以账单为准。
 - 每轮花费徽章挂在 `conversation.chat.turnTail` 槽位（order 100，紧跟「已删轮次」隐藏标记），同样只在探到这一行可用之后才注册。
@@ -223,7 +223,7 @@ POST /api/agent-control/shutdown          { }（可空体）→ 202 { ok } ← �
 ## 开发
 
 ```sh
-npm test    # 语法检查 + 335 项离线测试，不需要 DSH 进程，也不碰真实 profile
+npm test    # 语法检查 + 337 项离线测试，不需要 DSH 进程，也不碰真实 profile
 ```
 
 设计与取舍、与 DSH 版本的耦合点、改完的自检清单都在 [AGENTS.md](AGENTS.md)；
