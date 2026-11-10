@@ -3237,6 +3237,50 @@ test('每轮花费：按路由与峰谷单价折算，缓存命中比未命中�
   assert.equal(api.formatCost(offPeak.cost), '¥0.0030')
 })
 
+test('每轮花费：openrouter 的 provider/model 前缀按模型名归一化后命中内置价', () => {
+  const api = observeApi()
+  const usage = {
+    uncachedInputTokens: 2,
+    cacheReadTokens: 85410,
+    cacheWriteTokens: 1717,
+    outputTokens: 266,
+    routes: [{ provider: 'openrouter', model: 'anthropic/claude-opus-5.5' }],
+  }
+  const result = api.computeTurnCost(usage, { peak: true })
+  assert.equal(result.known, true, 'openrouter 的 anthropic/claude-opus-5.5 要能查到价')
+  assert.equal(result.currency, 'USD')
+  assert.equal(result.pricingKey, 'claude-opus-5-5', '点号版本号要归一化成横线')
+  assert.equal(result.matched, 'model')
+  // (2×4 + 85410×0.2 + 1717×5 + 266×20) / 1e6 = 0.030995
+  assert.ok(Math.abs(result.cost - 0.030995) < 1e-9, `金额不对：${result.cost}`)
+  assert.equal(api.formatCost(result.cost, result.currency), '$0.0310')
+})
+
+test('每轮花费：模型名归一化覆盖版本点号、日期后缀与 -latest', () => {
+  const api = observeApi()
+  const costOf = (model) => {
+    const result = api.computeTurnCost({
+      uncachedInputTokens: 1_000_000,
+      outputTokens: 0,
+      routes: [{ provider: 'openrouter', model }],
+    }, { peak: true })
+    return result.known ? result : null
+  }
+  const dated = costOf('openai/gpt-5.1-2025-11-13')
+  assert.ok(dated, '带日期的 gpt-5.1 要能命中')
+  assert.equal(dated.pricingKey, 'gpt-5-1')
+  assert.ok(Math.abs(dated.cost - 1.25) < 1e-9)
+
+  const latest = costOf('x-ai/grok-4.7-latest')
+  assert.ok(latest, '带 -latest 的 grok-4.7 要能命中')
+  assert.equal(latest.pricingKey, 'grok-4-7')
+
+  const prefix = costOf('openai/gpt-5-chat-latest')
+  assert.ok(prefix, 'gpt-5 家族的变体按前缀落到 gpt-5')
+  assert.equal(prefix.pricingKey, 'gpt-5')
+  assert.equal(prefix.matched, 'prefix')
+})
+
 test('每轮花费：未知模型只报「—」，拿不到用量时返回 null，不猜价格', () => {
   const api = observeApi()
   const result = api.computeTurnCost({
@@ -3283,7 +3327,10 @@ test('每轮花费：自定义价目表可以覆盖内置表，恢复后回到�
 
     api.save({ pricing: null })
     const restored = api.computeTurnCost(usage, { peak: true })
-    assert.equal(restored.known, false, '恢复内置表后这个 openrouter 路由又成了未知模型')
+    assert.equal(restored.known, true, '恢复内置表后这个模型按内置的模型级价目估算')
+    assert.equal(restored.currency, 'USD')
+    assert.equal(restored.pricingKey, 'claude-sonnet-5-5')
+    assert.ok(Math.abs(restored.cost - 2) < 1e-9, `内置金额不对：${restored.cost}`)
   } finally {
     api.save({ pricing: null })
   }

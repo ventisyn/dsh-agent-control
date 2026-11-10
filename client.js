@@ -174,6 +174,78 @@
     },
   }
 
+  /**
+   * 内置「模型级」价目表：每百万 token 的**美元**单价，键是归一化后的模型名。
+   *
+   * 用途：OpenRouter 这类聚合 provider 的 `routes.model` 形如 `anthropic/claude-opus-5.5`，
+   * 根本对不上 `provider/model` 精确表（那是给自家 provider 用的）。这里按**模型本身**记价，
+   * 查表时先去掉 provider 前缀、把版本里的点换成横线、去掉日期后缀，再匹配。
+   *
+   * 数值来自公开的模型价格目录（litellm 的 `model_prices_and_context_window.json`，2026-11 抓取），
+   * 取各厂商**官方直连价**；聚合 provider（OpenRouter 等）可能加价，所以金额仍是**估算**，
+   * 设置页始终可以用自定义价目表整条覆盖。没有峰谷：同一个价同时当高峰与空闲价。
+   */
+  const BUILTIN_MODEL_PRICING = {
+    // Anthropic
+    'claude-opus-5-5': { input: 4, cacheRead: 0.2, cacheWrite: 5, output: 20 },
+    'claude-opus-5': { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
+    'claude-opus-4-5': { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
+    'claude-sonnet-5-5': { input: 2, cacheRead: 0.1, cacheWrite: 2.5, output: 10 },
+    'claude-sonnet-5': { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+    'claude-sonnet-4-6': { input: 3, cacheRead: 0.3, cacheWrite: 3.75, output: 15 },
+    'claude-sonnet-4-5': { input: 3, cacheRead: 0.3, cacheWrite: 3.75, output: 15 },
+    'claude-haiku-4-5': { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 },
+    'claude-haiku-5-5': { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
+    // OpenAI
+    'gpt-5-6': { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
+    'gpt-5-5': { input: 5, cacheRead: 0.5, cacheWrite: 0, output: 30 },
+    'gpt-5-4': { input: 2.5, cacheRead: 0.25, cacheWrite: 0, output: 15 },
+    'gpt-5-4-mini': { input: 0.75, cacheRead: 0.075, cacheWrite: 0, output: 4.5 },
+    'gpt-5-4-nano': { input: 0.2, cacheRead: 0.02, cacheWrite: 0, output: 1.25 },
+    'gpt-5-2': { input: 1.75, cacheRead: 0.175, cacheWrite: 0, output: 14 },
+    'gpt-5-1': { input: 1.25, cacheRead: 0.125, cacheWrite: 0, output: 10 },
+    'gpt-5-mini': { input: 0.25, cacheRead: 0.025, cacheWrite: 0, output: 2 },
+    'gpt-5-nano': { input: 0.05, cacheRead: 0.005, cacheWrite: 0, output: 0.4 },
+    'gpt-5': { input: 1.25, cacheRead: 0.125, cacheWrite: 0, output: 10 },
+    'gpt-4-1': { input: 2, cacheRead: 0.5, cacheWrite: 0, output: 8 },
+    'gpt-4-1-mini': { input: 0.4, cacheRead: 0.1, cacheWrite: 0, output: 1.6 },
+    'gpt-4-1-nano': { input: 0.1, cacheRead: 0.025, cacheWrite: 0, output: 0.4 },
+    'o3-mini': { input: 1.1, cacheRead: 0.275, cacheWrite: 0, output: 4.4 },
+    'o3': { input: 2, cacheRead: 0.5, cacheWrite: 0, output: 8 },
+    'o4-mini': { input: 1.1, cacheRead: 0.275, cacheWrite: 0, output: 4.4 },
+    // Google
+    'gemini-2-5-pro': { input: 1.25, cacheRead: 0.125, cacheWrite: 0, output: 10 },
+    'gemini-2-5-flash': { input: 0.3, cacheRead: 0.03, cacheWrite: 0, output: 2.5 },
+    'gemini-2-5-flash-lite': { input: 0.1, cacheRead: 0.01, cacheWrite: 0, output: 0.4 },
+    // xAI
+    'grok-4-7': { input: 2, cacheRead: 0.5, cacheWrite: 0, output: 6 },
+    'grok-4-6': { input: 2, cacheRead: 0.5, cacheWrite: 0, output: 6 },
+    'grok-4-5': { input: 2, cacheRead: 0.3, cacheWrite: 0, output: 6 },
+    'grok-4-3': { input: 1.25, cacheRead: 0.2, cacheWrite: 0, output: 2.5 },
+    'grok-4': { input: 3, cacheRead: 0, cacheWrite: 0, output: 15 },
+    // DeepSeek（OpenRouter 等聚合 provider 的美元口径；自家 provider 仍走上面的 CNY 峰谷表）
+    'deepseek-chat': { input: 0.28, cacheRead: 0.028, cacheWrite: 0, output: 0.42 },
+    'deepseek-reasoner': { input: 0.28, cacheRead: 0.028, cacheWrite: 0, output: 0.42 },
+  }
+
+  /**
+   * 把模型 id 归一化成「模型本身」的名字，用于跨 provider 匹配价格。
+   *
+   * `anthropic/claude-opus-5.5` → `claude-opus-5-5`；`openai/gpt-5.1-2025-11-13` → `gpt-5-1`；
+   * `google/gemini-2.5-pro` → `gemini-2-5-pro`。只做字符串层面的规范化，不做语义猜测。
+   */
+  function normalizeModelId(model) {
+    let name = String(model ?? '').toLowerCase().trim()
+    const slash = name.lastIndexOf('/')
+    if (slash !== -1) name = name.slice(slash + 1)
+    name = name.replace(/\./g, '-')
+    name = name.replace(/-v\d+:\d+$/, '')
+    name = name.replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    name = name.replace(/-\d{8}$/, '')
+    name = name.replace(/-latest$/, '')
+    return name
+  }
+
   /** 设置页里那套控件与花费徽章的样式类（追加进 STYLE_CSS）。 */
   const COST_CLASS = 'dsh-agent-control-cost'
   const OBSERVE_CONTROL_CLASS = 'dsh-agent-control-observe-control'
@@ -237,6 +309,10 @@
   /** 当前生效的价目表：内置表 + 设置里的自定义覆盖（按 `provider/model` 整条覆盖）。 */
   function observePricingTable() {
     const table = {}
+    // 模型级内置表（美元，无峰谷）：同一个价同时当高峰与空闲价。
+    for (const [key, band] of Object.entries(BUILTIN_MODEL_PRICING)) {
+      table[key] = { currency: 'USD', peak: { ...band }, offPeak: { ...band } }
+    }
     for (const [key, entry] of Object.entries(BUILTIN_PRICING)) table[key] = { ...entry }
     const custom = getObservePrefs().pricing
     if (custom === null || typeof custom !== 'object') return table
@@ -258,6 +334,33 @@
     return table
   }
 
+  /**
+   * 查一条路由对应的价格条目。顺序：
+   *   1. `provider/model` 精确（自家 provider 的 DeepSeek 峰谷表、用户的精确覆盖）；
+   *   2. 归一化后的模型名精确（`anthropic/claude-opus-5.5` → `claude-opus-5-5`）；
+   *   3. 模型名前缀匹配（`gpt-5-chat` 落到 `gpt-5`，`claude-opus-5-5-20260101` 已在第 2 步归一化命中）。
+   *
+   * @param {Record<string, any>} table - 合并后的价目表。
+   * @param {string} provider - 路由的 provider 名。
+   * @param {string} model - 路由的模型 id（可能带 provider 前缀）。
+   * @returns {{ key: string, entry: any, matched: 'exact' | 'model' | 'prefix' } | undefined}
+   */
+  function lookupModelEntry(table, provider, model) {
+    const exactKey = `${provider}/${model}`
+    if (table[exactKey] !== undefined) return { key: exactKey, entry: table[exactKey], matched: 'exact' }
+    const normalized = normalizeModelId(model)
+    if (normalized === '') return undefined
+    if (table[normalized] !== undefined) return { key: normalized, entry: table[normalized], matched: 'model' }
+    // 前缀匹配只在内置模型表里做：用户表与 provider 表都是精确键，按前缀猜会误配。
+    const candidates = Object.keys(BUILTIN_MODEL_PRICING)
+      .filter((key) => normalized.startsWith(key) || key.startsWith(normalized))
+    if (candidates.length === 0) return undefined
+    candidates.sort((a, b) => b.length - a.length)
+    const key = candidates[0]
+    if (table[key] === undefined) return undefined
+    return { key, entry: table[key], matched: 'prefix' }
+  }
+
   /** 把一轮的 token 用量折算成金额（纯函数，离线测试直接调）。 */
   function computeTurnCost(usage, options = {}) {
     if (usage === null || typeof usage !== 'object') return null
@@ -275,11 +378,12 @@
       ? { provider: String(routes[0].provider ?? ''), model: String(routes[0].model ?? '') }
       : null
     const table = options.table ?? observePricingTable()
-    const entry = route === null ? undefined : table[`${route.provider}/${route.model}`]
+    const lookup = route === null ? undefined : lookupModelEntry(table, route.provider, route.model)
     const peak = options.peak ?? isPeakPricingTime(options.time)
-    if (entry === undefined) {
+    if (lookup === undefined) {
       return { known: false, route, routeCount: routes.length, peak, buckets, usage }
     }
+    const entry = lookup.entry
     const band = peak ? entry.peak : entry.offPeak
     const cost = (buckets.uncachedInput * band.input
       + buckets.cacheRead * band.cacheRead
@@ -295,6 +399,9 @@
       currency: entry.currency ?? 'CNY',
       cost,
       usage,
+      /** 命中的价目键与匹配方式，排障与 tooltip 用。 */
+      pricingKey: lookup.key,
+      matched: lookup.matched,
     }
   }
 
@@ -315,9 +422,15 @@
     if (result.known !== true) {
       lines.push(t('cost.unknown'))
       if (result.route !== null) lines.push(`${result.route.provider}/${result.route.model}`)
+      const buckets = result.buckets ?? {}
+      lines.push(`${t('cost.usageLine')}: ${buckets.uncachedInput ?? 0} / ${buckets.cacheRead ?? 0} / ${buckets.cacheWrite ?? 0} / ${buckets.output ?? 0}`)
+      lines.push(t('cost.unknownHint'))
       return lines.join('\n')
     }
     if (result.routeCount > 1) lines.push(t('cost.mixedRoutes'))
+    if (result.matched !== 'exact') {
+      lines.push(t('cost.pricingFrom').replace('{key}', String(result.pricingKey ?? '')))
+    }
     const band = result.band
     const money = (value, price) => `${value} × ${symbolOf(result.currency)}${price}/M`
     lines.push(`${t('cost.uncachedInput')}: ${money(result.buckets.uncachedInput, band.input)}`)
@@ -1329,7 +1442,7 @@
     'notify.intro': '说完一轮时用一声提示音（可选再加一条系统通知）告诉你。设置只存在这个浏览器里，不进 profile。',
     'cost.sectionLabel': '每轮花费',
     'cost.title': '每轮花费',
-    'cost.intro': '在每轮回复下方标出这一轮大概花了多少钱（按 token 用量与价目表估算）。设置只存在这个浏览器里，不进 profile。',
+    'cost.intro': '在每轮回复下方标出这一轮大概花了多少钱（按 token 用量与价目表估算）。内置 DeepSeek 官方价与常见模型（OpenAI / Anthropic / Google / xAI 等）的公开美元价；设置只存在这个浏览器里，不进 profile。',
     'notify.chime.title': '任务完成时响铃',
     'notify.chime.desc': '一轮回复结束、会话从运行变为空闲时响一声；页面需要先被点过一次，浏览器才允许出声。',
     'notify.sound.title': '音效',
@@ -1363,6 +1476,9 @@
     'cost.unknownShort': '—',
     'cost.unknown': '这一轮没有可用的 token 用量，或者模型不在价目表里',
     'cost.mixedRoutes': '这一轮跨了多个模型，金额按第一个路由估算',
+    'cost.pricingFrom': '按「{key}」的公开价估算（聚合 provider 可能加价）',
+    'cost.usageLine': 'token（未命中 / 缓存读 / 缓存写 / 输出）',
+    'cost.unknownHint': '在设置页给这个模型填一个价格，就能显示金额',
     'cost.uncachedInput': '输入（未命中缓存）',
     'cost.cacheRead': '输入（命中缓存）',
     'cost.cacheWrite': '输入（写缓存）',
@@ -1371,8 +1487,8 @@
     'cost.peak': '按高峰时段单价计算',
     'cost.offPeak': '按空闲时段单价计算',
     'cost.pricing.title': '价目表',
-    'cost.pricing.desc': '内置 DeepSeek 官方公开价（每百万 token，人民币）并区分高峰与空闲两档；可用 JSON 按 provider/model 覆盖或补充，未知模型一律显示「—」。',
-    'cost.pricing.placeholder': '例如：{"openrouter/anthropic/claude-sonnet-5.5": {"currency": "USD", "peak": {"input": 3, "cacheRead": 0.3, "cacheWrite": 3.75, "output": 15}}}',
+    'cost.pricing.desc': '内置 DeepSeek 官方价（人民币，区分高峰与空闲）与常见模型的公开美元价（按模型名匹配：自动去掉 provider 前缀、版本点号与日期后缀，所以 openrouter 的 anthropic/claude-opus-5.5 也能算）。可用 JSON 覆盖或补充，键可以是 provider/model 或模型名；未知模型显示「—」，悬停时给出 token 用量。',
+    'cost.pricing.placeholder': '例如：{"openrouter/anthropic/claude-opus-5.5": {"currency": "USD", "peak": {"input": 4, "cacheRead": 0.2, "cacheWrite": 5, "output": 20}}}',
     'cost.pricing.save': '保存价目表',
     'cost.pricing.reset': '恢复内置价目表',
     'cost.pricing.saved': '已保存，下一次渲染就生效。',
@@ -1514,7 +1630,7 @@
     'notify.intro': 'Play a short chime (and optionally a system notification) when a turn finishes. Settings live in this browser only; nothing is written to the profile.',
     'cost.sectionLabel': 'Per-turn cost',
     'cost.title': 'Per-turn cost',
-    'cost.intro': 'Show roughly what each turn cost under its reply, estimated from token usage and a price table. Settings live in this browser only; nothing is written to the profile.',
+    'cost.intro': 'Show roughly what each turn cost under its reply, estimated from token usage and a price table. DeepSeek list prices and public USD prices for common models (OpenAI / Anthropic / Google / xAI) are built in. Settings live in this browser only; nothing is written to the profile.',
     'notify.chime.title': 'Chime when a turn finishes',
     'notify.chime.desc': 'One short sound when a reply settles and the session goes from running to idle. The page must be clicked once before a browser lets it make any sound.',
     'notify.sound.title': 'Sound',
@@ -1548,6 +1664,9 @@
     'cost.unknownShort': '—',
     'cost.unknown': 'No usable token usage for this turn, or the model is not in the price table',
     'cost.mixedRoutes': 'This turn used several models; the amount is estimated from the first route',
+    'cost.pricingFrom': 'Estimated from the public price of "{key}" (aggregators may add a markup)',
+    'cost.usageLine': 'tokens (uncached / cache read / cache write / output)',
+    'cost.unknownHint': 'Add a price for this model in the settings section to show an amount',
     'cost.uncachedInput': 'Input (cache miss)',
     'cost.cacheRead': 'Input (cache hit)',
     'cost.cacheWrite': 'Input (cache write)',
@@ -1556,8 +1675,8 @@
     'cost.peak': 'Priced at peak-hour rates',
     'cost.offPeak': 'Priced at off-peak rates',
     'cost.pricing.title': 'Price table',
-    'cost.pricing.desc': 'DeepSeek public list prices (per million tokens, CNY) with peak and off-peak bands are built in. Override or extend them by provider/model with JSON; unknown models show a dash.',
-    'cost.pricing.placeholder': 'Example: {"openrouter/anthropic/claude-sonnet-5.5": {"currency": "USD", "peak": {"input": 3, "cacheRead": 0.3, "cacheWrite": 3.75, "output": 15}}}',
+    'cost.pricing.desc': 'Built in: DeepSeek list prices (CNY, peak/off-peak) and public USD prices for common models, matched by model name (provider prefixes, version dots and date suffixes are normalized away, so openrouter\'s anthropic/claude-opus-5.5 also resolves). Override or extend with JSON keyed by provider/model or model name; unknown models show a dash and list their token usage on hover.',
+    'cost.pricing.placeholder': 'Example: {"openrouter/anthropic/claude-opus-5.5": {"currency": "USD", "peak": {"input": 4, "cacheRead": 0.2, "cacheWrite": 5, "output": 20}}}',
     'cost.pricing.save': 'Save price table',
     'cost.pricing.reset': 'Restore built-in prices',
     'cost.pricing.saved': 'Saved; it takes effect on the next render.',
@@ -4293,6 +4412,8 @@ let clientCtx
       sounds: OBSERVE_SOUNDS,
       defaults: DEFAULT_OBSERVE_PREFS,
       builtinPricing: BUILTIN_PRICING,
+      builtinModelPricing: BUILTIN_MODEL_PRICING,
+      normalizeModelId,
       /** 系统通知（与铃声同一行）：权限、主动申请、手动弹一条，供排障与测试。 */
       systemNotify: {
         supported: () => notificationCtor() !== null,
