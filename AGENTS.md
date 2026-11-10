@@ -56,14 +56,14 @@
 | `package.json` | `version` 是版本号唯一真源；`exports` 暴露 `./client` 与五个组件子路径 |
 
 ```sh
-npm test                                                          # node --check + 337 项离线测试
+npm test                                                          # node --check + 338 项离线测试
 npm run log:inspect -- <会话 id>                                   # 只读诊断器（3.6）
 node test/v4-load-check.mjs <DSH 的 node_modules/.pnpm> <会话 id>   # 真实加载校验器复核（不进 npm test）
 ```
 
 离线测试不碰真实 profile：会话删除的文件操作全在 `os.tmpdir()` 的临时目录，热重启与关闭实例的测试注入假 spawn/appExit。
 
-⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 90、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 337 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
+⚠️ 受限沙箱里 `node --test` 要为每个测试文件 spawn 子进程并走管道，会报 `Error: spawn EPERM`、八个文件全 ✖。那是沙箱边界，不是测试失败。改为逐个直跑：`restart` 54、`restart-helper` 22、`host` 83、`client` 91、`features` 18、`locale` 5、`turn-delete` 25、`session-delete` 40，合计 338 项（`node test/<文件>.test.mjs`）。改了 `test/` 就同步改这里与 `README` 的「开发」一节。
 
 ## 3. 关键机制与契约要点
 
@@ -227,6 +227,7 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
   - 设置页可以用 JSON 覆盖或补充（键可以是 `provider/model` 或模型名）；未知模型显示「—」，悬停时给出 token 用量与「填价格」的提示。
 - **金额是估算，不是账单**：多路由的一轮按第一个路由估算；官方价格会变，内置表只是默认值。README 与界面文案都必须这么写。
 - **客户端两个槽位**：`conversation.chat.turnTail` 的第二个条目（每轮花费徽章，order 100，紧跟「已删轮次」隐藏标记的 order 90）与 `settings.section` 的「每轮花费」一节（order 520，排在提醒那一节之后）。两者都在探到 cost 行可用之后才注册。
+- **呈现对齐官方**：徽章是按钮（硬币图标 + 金额），尺寸/颜色/圆角/悬停背景照官方轮次尾部的「用量」按钮；点击弹出一个与官方「本轮用量」面板同款的明细浮层（标题 + .5px 分隔线 + 两列 `dl`，列出路由、缓存命中率、四个 token 桶的「数量 · 单价」、合计、计价依据与「估算，不是账单」）。浮层 `position: fixed` + 视口上下翻转，点外部或 Esc 关闭；未知模型也能展开看 token 用量。样式全部走 `--dsw-*` token，明暗主题自动成立。
 - **设置与 notify 行共用**同一份 `localStorage` 设置（键 `dsh-agent-control:observe`，含 notify 行的 `systemNotify`），不进 profile、不落文件——插件仍然只有「会话日志」这一份持久事实（3.8）。换浏览器或清站点数据就回到默认值。
 - 关掉这一行 = 不注册徽章与这一节；铃声、系统通知与「任务完成提醒」那一节照常。
 
