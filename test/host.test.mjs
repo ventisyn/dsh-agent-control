@@ -1271,6 +1271,71 @@ test('模型工具：子代理调用 ⇒ RESTART_FORBIDDEN（且不写待办）'
   assert.equal(readPending(restartDir(home)), undefined)
 })
 
+test('模型工具：rc.3 没有 agents.roots 时用会话 header 判主会话（顶层放行）', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const registered = []
+  const { ctx } = makeToolContext({
+    tools: { register: (definition) => { registered.push(definition); return () => {} } },
+    agents: { list: () => [] },
+    sessions: { get: () => ({ header: { id: 'session-me', isSeeded: false } }) },
+  })
+  registerRestartTool(ctx, makeRestartDeps(ctx, { dshHome: home }))
+
+  const value = await registered[0].execute({ reason: '装完了要重启' }, { agent: { id: 'session-me' } })
+
+  assert.equal(value.error.code, ERROR_CODES.restartDenied, '顶层会话要走到审批（没有审批服务 ⇒ DENIED），不能被根检查挡掉')
+})
+
+test('模型工具：rc.3 会话 header 标了 origin=subagent ⇒ RESTART_FORBIDDEN', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const registered = []
+  const { ctx } = makeToolContext({
+    tools: { register: (definition) => { registered.push(definition); return () => {} } },
+    agents: { list: () => [] },
+    sessions: { get: () => ({ header: { id: 'session-sub', isSeeded: false, origin: 'subagent', delegationDepth: 1 } }) },
+  })
+  registerRestartTool(ctx, makeRestartDeps(ctx, { dshHome: home }))
+
+  const value = await registered[0].execute({ reason: '子代理想重启' }, { agent: { id: 'session-sub' } })
+
+  assert.equal(value.error.code, ERROR_CODES.restartForbidden)
+  assert.equal(readPending(restartDir(home)), undefined)
+})
+
+test('模型工具：rc.3 只有 delegationDepth（没有 origin）也按子代理拒绝', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const registered = []
+  const { ctx } = makeToolContext({
+    tools: { register: (definition) => { registered.push(definition); return () => {} } },
+    agents: { list: () => [] },
+    sessions: { get: () => ({ header: { id: 'session-deep', isSeeded: false, delegationDepth: 2 } }) },
+  })
+  registerRestartTool(ctx, makeRestartDeps(ctx, { dshHome: home }))
+
+  const value = await registered[0].execute({ reason: '子代理想重启' }, { agent: { id: 'session-deep' } })
+
+  assert.equal(value.error.code, ERROR_CODES.restartForbidden)
+})
+
+test('模型工具：rc.3 既没有 roots 也拿不到会话 header ⇒ RESTART_UNSUPPORTED（不猜）', async (t) => {
+  const home = tempHome(t)
+  resetRestartRuntimeForTest()
+  const registered = []
+  const { ctx } = makeToolContext({
+    tools: { register: (definition) => { registered.push(definition); return () => {} } },
+    agents: { list: () => [] },
+  })
+  registerRestartTool(ctx, makeRestartDeps(ctx, { dshHome: home }))
+
+  const value = await registered[0].execute({ reason: '装完了要重启' }, { agent: { id: 'session-me' } })
+
+  assert.equal(value.error.code, ERROR_CODES.restartUnsupported)
+  assert.match(value.error.message, /判断主会话/)
+})
+
 test('模型工具：有别的会话在跑 ⇒ RESTART_BLOCKED，文案告诉模型等谁', async (t) => {
   const home = tempHome(t)
   resetRestartRuntimeForTest()

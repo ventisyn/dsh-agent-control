@@ -1411,14 +1411,14 @@ function buildRestartToolDefinition(ctx, deps) {
         if (callerId === '') {
           return errorValue(ERROR_CODES.restartForbidden, '拿不到调用者会话，无法确认这次重启由谁发起；请让主会话调用这个工具。')
         }
-        const roots = safeCall(() => ctx?.get?.('agents')?.roots?.())
-        if (!Array.isArray(roots)) {
+        const rootCaller = isRootCaller(ctx, callerId)
+        if (rootCaller === undefined) {
           return errorValue(
             ERROR_CODES.restartUnsupported,
-            '宿主没有提供 agents.roots()，无法确认调用者是主会话；为安全起见已拒绝，请让主会话发起这次重启。',
+            '宿主没有提供判断主会话所需的接口（agents.roots 与会话 header 都拿不到）；为安全起见已拒绝，请让主会话发起这次重启。',
           )
         }
-        if (!roots.some((root) => sameSession(root?.id, callerId))) {
+        if (rootCaller === false) {
           // 计划 3.1：只有根 agent 能重启宿主——子代理重启会把派它出来的那一轮一起打断。
           return errorValue(ERROR_CODES.restartForbidden, '子代理不能重启宿主；请让主会话发起这次重启（把需要重启的原因告诉它）。')
         }
@@ -1463,6 +1463,40 @@ function sameSession(left, right) {
   if (a === '' || b === '') return false
   if (a === b) return true
   return sessionDirNames(a).some((name) => sessionDirNames(b).includes(name))
+}
+
+/**
+ * 调用者是不是主会话（根 agent）。
+ *
+ * 0.2.2-rc.3 移除了 `agents.roots()`（AgentRegistry 不再暴露顶层集合），所以先试它
+ * （旧宿主仍然可用），拿不到时退回会话 header 的持久 lineage：`origin === 'subagent'`
+ * 或 `delegationDepth > 0` 判定为子代理，其余视为顶层。两路都拿不到时返回 `undefined`，
+ * 调用方按 `RESTART_UNSUPPORTED` 拒绝——绝不把「判断不了」当成「是主会话」。
+ *
+ * @param {any} ctx - 宿主上下文。
+ * @param {string} callerId - 调用者会话 id。
+ * @returns {boolean|undefined} true=主会话；false=子代理；undefined=无法判断。
+ */
+function isRootCaller(ctx, callerId) {
+  const roots = safeCall(() => ctx?.get?.('agents')?.roots?.())
+  if (Array.isArray(roots)) return roots.some((root) => sameSession(root?.id, callerId))
+  const header = safeCall(() => liveSessionOf(ctx, callerId)?.header)
+  if (header === undefined || header === null || typeof header !== 'object') return undefined
+  if (header.origin === 'subagent') return false
+  const depth = header.delegationDepth
+  if (typeof depth === 'number' && Number.isSafeInteger(depth) && depth > 0) return false
+  return true
+}
+
+/** 按两种拼写取活会话（只读；宿主没提供 sessions 时返回 undefined）。 */
+function liveSessionOf(ctx, sessionId) {
+  const sessions = safeCall(() => ctx?.get?.('sessions'))
+  if (sessions === undefined || sessions === null) return undefined
+  for (const id of sessionDirNames(sessionId)) {
+    const session = safeCall(() => sessions.get?.(id))
+    if (session !== undefined && session !== null) return session
+  }
+  return undefined
 }
 
 /**
