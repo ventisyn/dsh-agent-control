@@ -1,7 +1,7 @@
 # SPIKE：热重启 M0 原型验证（`0.2.1-alpha.1-v1.1.0`）
 
 > 对应 `docs/PLAN-hot-restart.md` 第 4 节的 S1–S6。**原型代码在临时目录里，用完即删，不进主线**（本文件是唯一留下的东西）。
-> 按 AGENTS.md 第 8 节：本文件不写本机路径、profile 名、实例名与端口。
+> 按 AGENTS.md 第 4 节：本文件不写本机路径、profile 名、实例名与端口。
 
 状态：**M0 完成**（S1 部分验证、S5 未验证），结论已回填 `docs/PLAN-hot-restart.md`。
 
