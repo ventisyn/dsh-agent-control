@@ -240,12 +240,17 @@ POST /api/agent-control/shutdown            # {} → 202，只有界面入口，
 第二步  把 package.json 的 version 提到目标版本 → 提交 chore: start <目标完整版本号>
         → 改代码 → npm test → 按第 6 节实测
 第三步  发布前隐私检查（判据与清单只在本机文件里，公开仓库不写检查项）
-第四步  验收通过后改名发布：dev 改名成版本分支 → 先删远端 dev 再推版本分支
+第四步  **先问用户要不要发布到远端**（验收通过 ≠ 发布许可；默认不自动发）：
+        用户同意 → dev 改名成版本分支 → 先删远端 dev 再推版本分支
         → 先 push tag 再建 GitHub Release（gh release create --verify-tag）→ 移默认分支
-        → 按保留策略删旧分支
+        → 按保留策略删旧分支 → 把本机 profile 的插件切到新 release 并重启实例加载
+        用户不同意 / 没回复 → 停在 dev 分支：改动与验证结论照常提交，不推送、不改名、不打 tag
 ```
 
 - 保留策略：Z 位发布不删任何旧分支；Y 位按 `X.Y` 分组每组只留最新一条；X 位每个更早的主版本线只留最新一条。`/dev` 同时只有一条。
+- **发布是问出来的，不是做出来的**：验收通过只代表「可以问」。用户明确同意才执行第 4 步的推送部分；用户拒绝或没回复就停在 dev 分支，不要「先推了再问」。
+- **dev 分支推送也是公开行为**：正式发布必须问；如果用户要求完全离线，连 `git push -u origin <目标完整版本号>/dev` 也不要做，改动只留在本地 dev 分支。
+- **用户同意发布后，实例要自动加载新版本**：把本机工作 profile 的依赖切到 `release/<新完整版本号>`（`dsh plugin --profile <profile 名> add ...`，需要 danger-full-access），然后重启实例（优先模型工具 `restart_harness`，不可用时让用户在设置页点「重启 DSH」）。命令与核对方式见 [docs/RELEASING.md](docs/RELEASING.md) 第四步后半。
 - 版本号要落在第一个提交里，所以第一条命令是开 dev 分支。在版本分支上写代码再补开 dev，未提交的改动会跟过来，但事后分辨哪些属于这一轮很麻烦。
 - 分支名是完整版本号，profile 名只是其中的 harness 版本，两者不相等，改动时分别对齐，都现查。实测记录在 `docs/VERIFY-<完整版本号>.md`，含未验证项。
 - profile 路径不写死在源码里：需要时按 `profileContext.patchPath` → `profileContext.dir` → 命令行 `--profile <name>` 依次解析，拿不到就不写，只记 warn。

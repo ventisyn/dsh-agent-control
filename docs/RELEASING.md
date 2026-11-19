@@ -69,9 +69,11 @@ git push -u origin <目标完整版本号>/dev
 - 命中就**先改再发**；确实改不掉的（已经公开过的旧内容）在当次的 `docs/VERIFY-<完整版本号>.md` 里记一句待办——**不要在公开文档里复述检查项本身**。
 - 结论写进当次 `docs/VERIFY-<完整版本号>.md`：一行「隐私检查：已过 / 有几处待办」即可。
 
-### 第四步：验收通过后改名成版本分支
+### 第四步：用户同意后改名成版本分支
 
 **「验收」的定义就是第 9 节自检清单全部通过。没跑过实测的改动不许改名发布。**
+
+**验收通过 ≠ 发布许可。** 先问用户要不要发布到远端，用户明确同意才执行下面的命令；拒绝或没回复就停在 dev 分支：改动与验证结论照常提交，不推送、不改名、不打 tag。
 
 ```sh
 git checkout <目标完整版本号>/dev
@@ -97,6 +99,7 @@ gh api -X PATCH repos/ventisyn/dsh-agent-control -f default_branch=<目标完整
 
 要点：
 
+- **发布前必须问用户**：验收通过只代表可以问，不代表可以推；用户拒绝或没回复时停在 dev 分支。
 - **每次发布都要建 GitHub Release，不能只打 tag**；Release 标题写干净版本号。
 - **tag 名带 `release/` 前缀，分支名不带**：两者同名会让 git 报 `refname is ambiguous`。
 - **每次发布后把 GitHub 默认分支移到新版本**。
@@ -104,6 +107,21 @@ gh api -X PATCH repos/ventisyn/dsh-agent-control -f default_branch=<目标完整
 - `/dev` 分支**同时只有一条**；它改名成版本分支后，下一轮开新的。
 - 版本分支**只由 dev 改名产生**：不要直接在版本分支上提交，也不要为同一个版本另开分支。
 - 版本号在 dev 的**第一个提交**里就提到目标版本；中途若改动性质变化，先 `git branch -m` 改成新目标版本名，再改 `package.json`。
+
+### 发布后：让本机实例加载新版本
+
+用户同意发布、远端推送完成后，把本机工作 profile 的依赖切到新 release，并重启实例：
+
+```sh
+# 1) 切 profile 依赖（写工作区之外的 profile，需要 danger-full-access）
+dsh plugin --profile <当前 profile 名> add github:ventisyn/dsh-agent-control#release/<目标完整版本号>
+
+# 2) 重启实例加载新版本：优先用模型工具 restart_harness（带续作）；
+#    不可用时让用户在设置页点「重启 DSH」，或按本机约定重启 dsh web。
+#    不要用桌面启动器冷启动——启动器托管的实例连续两次启动失败会触发它的配置隔离。
+```
+
+核对：`GET /api/agent-control/restart/status` 的 `version` 应为新的完整版本号；`--dump-config` 无 error/warn。
 
 ### 版本分支保留策略
 
