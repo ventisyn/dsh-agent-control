@@ -199,7 +199,7 @@ node test/log-inspect.mjs <会话 id | 日志文件路径> [--json]
 - **音频需要一次用户手势**：没有用户手势时音频上下文起不来，铃声静默降级。
 - **系统通知（同一行里的子开关）**：纯客户端 `Notification` API（不调 PowerShell / osascript，网页版与桌面版同一份代码，桌面版里的通知身份由承载页面的宿主决定）。默认 `false`；设置项 `systemNotify`，`normalizeObservePrefs` 只认 `source.systemNotify === true`。**权限只能从用户手势发起**：设置页复选框的 `onChange` 与「测试通知」按钮调 `requestNotificationPermission()`；完成边沿只读 `Notification.permission`，`granted` 才弹，绝不主动请求。通知形状：title「任务完成」、body 是会话标题（拿不到标题时「一轮回复已经结束」）、`silent: true`（声音归铃声）、`tag` 为 `dsh-agent-control:<sessionId>`（同一会话替换而不是堆叠）；点击通知聚焦窗口并调用 `uiWorkspace.openSession(sessionId)`。排障抓手 `window.__dshAgentControl.observe.systemNotify = { supported, permission, request, show }`，计数在 `observe.stats().notifications`。`client.js` 内嵌 `MESSAGES` 的 `notify.system.*`（zh / en）与 `locale/notify/{zh,en}.json` 的 `meta.description` 同步描述它。
 
-## 7. 本地联调与 profile 装/摘（AGENTS.md 第 5 节）
+## 7. 本地联调与 profile 装/摘（AGENTS.md 第 6、8 节）
 
 ### 装进 profile 验证
 
